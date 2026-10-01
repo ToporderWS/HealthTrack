@@ -1,0 +1,161 @@
+/**
+ * 《康迹 HealthTrack》设计令牌 —— **定义层（DESIGN.md §1.1 ①）**
+ *
+ * 本文件是全部设计值的**唯一字面值来源**：
+ *   ① uni.scss（本文件，SCSS 变量）  → ② App.vue（--x 取值于同名 SCSS 变量，转写为 CSS 自定义属性）
+ *   → ③ components/**、pages/**（只引用 var(--x)；SCSS 场景可用 $x）
+ *
+ * 硬规则（DESIGN.md §1.3）：
+ *   - 字面值只写在本文件；App.vue 不写新值，只做转写；
+ *   - 组件与页面**禁止**出现裸 HEX / 裸 rgba / 裸字号 / 裸间距 / 裸圆角 / 裸阴影 / 裸比例值；
+ *   - 新增令牌必须**先登记 frontend/DESIGN.md**，再在本文件与 App.vue 落地。
+ *
+ * 令牌来源：frontend/DESIGN.md §2 色彩 / §3 字体 / §4 间距 / §5 圆角 / §6 阴影 / §7 动效 / §10.2 布局。
+ * 本文件由 uni-app 自动注入每个 SFC，组件内**无需 import**。
+ */
+
+/* ══════════════════════ §2.1 中性阶（冷灰，11 档） ══════════════════════ */
+$c-n-0:   #FFFFFF;
+$c-n-25:  #FAFBFC;
+$c-n-50:  #F5F7F9;
+$c-n-100: #EEF1F4;
+$c-n-200: #E2E6EA;
+$c-n-300: #CBD2D9;
+$c-n-400: #A8B0B8;
+$c-n-500: #6B7683;
+$c-n-600: #4E5969;
+$c-n-700: #333A45;
+$c-n-800: #1F2329;
+
+/* ══════════════════════ §2.2 品牌主色「康迹青」（8 档） ══════════════════════ */
+$c-p-50:  #F1FAF8;
+$c-p-100: #E3F4F1;
+$c-p-200: #B8E5DE;
+$c-p-300: #7FD3C7;
+$c-p-400: #2FB3A2;
+$c-p-500: #0E9384;
+$c-p-600: #0A7A6D;
+$c-p-700: #075F56;
+
+/* ══════════════════════ §2.3 语义色（4 主色 + 4 浅底） ══════════════════════ */
+$c-success:    #2E9B6B;
+$c-success-bg: #E9F6F0;
+$c-warning:    #C98A2E;
+$c-warning-bg: #FDF5E7;
+$c-danger:     #D24B4B;
+$c-danger-bg:  #FDECEC;
+$c-info:       #3E7BB8;
+$c-info-bg:    #EDF3FA;
+
+/* ══════════════════════ §2.4 文字 / 表面 / 边框（语义层，不新增色值） ══════════════════════ */
+/* 文字 */
+$t-1:       $c-n-800;
+$t-2:       $c-n-600;
+$t-3:       $c-n-500;
+$t-4:       $c-n-400;
+$t-inverse: $c-n-0;
+$t-link:    $c-p-600;
+$t-danger:  $c-danger;
+/* 表面 */
+$s-page:      $c-n-50;
+$s-card:      $c-n-0;
+$s-card-sub:  $c-n-25;
+$s-sunken:    $c-n-100;
+$s-brand-soft: $c-p-100;
+$s-overlay:   rgba(23, 26, 29, 0.45); /* 遮罩底（本节登记） */
+/* 边框 */
+$b-line:   #EDF0F3; /* 1rpx 分隔线 / 卡片默认描边（分隔线专用档，不得改用 $c-n-100） */
+$b-border: $c-n-200;
+$b-focus:  $c-p-400;
+
+/* ══════════════════════ §2.5 图表专用色（唯一色相，无第 9 个图表颜色） ══════════════════════ */
+$c-chart-main:        $c-p-500;
+$c-chart-a:           $c-p-600;
+$c-chart-b:           $c-p-300;
+$c-chart-goal:        $c-n-300;
+$c-chart-grid:        $c-n-100;
+$c-chart-area-top:    rgba(14, 147, 132, 0.12); /* = $c-p-500 @12% */
+$c-chart-area-bottom: rgba(14, 147, 132, 0);    /* = 0% */
+$c-chart-point:       $c-p-600;
+$c-chart-point-ring:  $c-n-0;
+
+/* ══════════════════════ §3 字体（字族 / 字阶 / 字重） ══════════════════════ */
+$font-sans: -apple-system, BlinkMacSystemFont, "HarmonyOS Sans SC", "MiSans", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+$font-num:  $font-sans; /* 数字同族，不引入第二字族 */
+
+/* 字阶（13 档）：字号 + 行高成对定义，禁止跨档拼用 */
+$fs-display:      72rpx; $lh-display:      84rpx;
+$fs-metric-xl:    56rpx; $lh-metric-xl:    68rpx;
+$fs-metric-l:     44rpx; $lh-metric-l:     56rpx;
+$fs-h1:           44rpx; $lh-h1:           60rpx;
+$fs-h2:           34rpx; $lh-h2:           48rpx;
+$fs-h3:           30rpx; $lh-h3:           42rpx;
+$fs-body:         28rpx; $lh-body:         44rpx;
+$fs-body-strong:  28rpx; $lh-body-strong:  44rpx;
+$fs-sub:          26rpx; $lh-sub:          40rpx;
+$fs-caption:      24rpx; $lh-caption:      34rpx;
+$fs-micro:        22rpx; $lh-micro:        32rpx;
+$fs-btn-l:        32rpx; $lh-btn-l:        44rpx;
+$fs-btn-m:        28rpx; $lh-btn-m:        40rpx;
+/* 长文本页（SC-23/24/25）行高 */
+$lh-reading:      48rpx;
+
+/* 字重：只用 400 / 500 / 600 */
+$fw-regular:  400;
+$fw-medium:   500;
+$fw-semibold: 600;
+
+/* ══════════════════════ §4 间距（基数 8rpx） ══════════════════════ */
+$sp-1:  4rpx;   $sp-2:  8rpx;   $sp-3:  12rpx;  $sp-4:  16rpx;  $sp-5:  24rpx;
+$sp-6:  28rpx;  $sp-7:  32rpx;  $sp-8:  40rpx;  $sp-9:  56rpx;  $sp-10: 80rpx;
+
+/* 布局常量（唯一水平 / 纵向节奏来源） */
+$gutter:      32rpx;  /* = $sp-7 */
+$card-pad:    28rpx;  /* = $sp-6 */
+$card-gap:    24rpx;  /* = $sp-5 */
+$section-gap: 40rpx;  /* = $sp-8 */
+$row-h:       108rpx;
+$row-pad-y:   28rpx;  /* = $sp-6 */
+$tap-min:     88rpx;
+$tabbar-h:    110rpx;
+$navbar-h:    88rpx;
+$content-max: 960rpx;
+/* 底部安全区：平台提供（env），DESIGN.md §4③ 明确其不属于本设计系统定义，仅在本文件与 App.vue 透传 */
+$safe-b:      env(safe-area-inset-bottom);
+
+/* ══════════════════════ §5 圆角（6 档） ══════════════════════ */
+$r-xs:   8rpx;
+$r-sm:   12rpx;
+$r-md:   20rpx;  /* ★ 默认圆角 */
+$r-lg:   28rpx;
+$r-xl:   40rpx;  /* ★ 上限 */
+$r-full: 999rpx; /* 全圆语义（不计入同屏 3 档统计） */
+
+/* ══════════════════════ §6 阴影（4 级） ══════════════════════ */
+$el-0: none;
+$el-1: 0 2rpx 8rpx rgba(31, 35, 41, 0.04);
+$el-2: 0 8rpx 24rpx rgba(31, 35, 41, 0.06);
+$el-3: 0 16rpx 48rpx rgba(31, 35, 41, 0.10);
+
+/* ══════════════════════ §7 动效（时长 / 缓动 / 按下反馈） ══════════════════════ */
+$d-fast:     120ms;
+$d-row:      150ms;
+$d-base:     200ms;
+$d-slow:     300ms;  /* 上限，不得超出 */
+$d-toast:    2000ms; /* Toast 停留时长 */
+$d-breathe:  1200ms; /* 骨架呼吸 / 加载指示旋转周期 */
+$ease-std:   cubic-bezier(0.2, 0, 0.2, 1);
+$ease-out:   cubic-bezier(0, 0, 0.2, 1);
+$ease-in:    cubic-bezier(0.4, 0, 1, 1);
+$press-scale:   0.97;
+$press-opacity: 0.92;
+$breathe-opacity: 0.55; /* 骨架屏透明度呼吸的最低值（配合 $d-breathe）｜S3-1 补登 DESIGN.md §7③ */
+
+/* ══════════════════════ §10.2 布局令牌（值全部由 §4/§5/§6 推导） ══════════════════════ */
+$nav-total-h:    calc(var(--status-bar-height) + #{$navbar-h});
+$tabbar-total-h: calc(#{$tabbar-h} + #{$safe-b});
+$page-pad-x:     $gutter;
+$page-pad-t:     $section-gap;
+$page-pad-b:     $section-gap;
+$chart-w:        calc(100% - 2 * var(--gutter));
+$chart-h:        480rpx;

@@ -1,0 +1,81 @@
+【S2 第六批 E-01~E-04 数据导出 · 人工验收 · 复制粘贴素材 A：启动与一键核验命令】
+
+口径提醒（本机硬约束）：
+  - Git Bash 基础命令（ls / grep / head / tail / cat / npx）大面积缺失；
+    本素材**不使用任何管道**，所有脚本自身落盘 stdout/stderr。
+  - 判定"是否执行成功"以【落盘产物 + 退出码】为准，**不以控制台是否为空为准**。
+  - 原有 S2 第一~第五批脚本/测试**不重跑、不修改**。
+
+────────────────────────────────────────────────────────────
+[第 0 步] 启动后端（另开窗口，保持运行）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo/backend
+  ./.venv/Scripts/python.exe wsgi.py
+
+  校验：浏览器打开 http://127.0.0.1:5000/api/v1/health  ->  {"code":"OK",...}
+
+────────────────────────────────────────────────────────────
+[第 1 步] 本批自动化测试（78 项用例）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo/backend
+  ./.venv/Scripts/python.exe -m pytest tests/batch6 -q -p no:cacheprovider > ../.workbuddy/_b6test.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行形如  78 passed in NN.NNs
+
+────────────────────────────────────────────────────────────
+[第 2 步] 真实 HTTP 联调（双账号 -> 造数 -> 4 接口 -> 断言 -> 清理）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo
+  backend/.venv/Scripts/python.exe scripts/s2_batch6_http_smoke.py > .workbuddy/_b6smoke.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行  合计 NN/NN PASS，0 FAIL
+  说明：后端必须先启动（第 0 步）；脚本收尾会物理删除 tstb6smokea / tstb6smokeb 两个测试账号。
+
+────────────────────────────────────────────────────────────
+[第 3 步] 浏览器 Console 一键验收（见素材 C：s2_batch6_accept.console.txt）
+────────────────────────────────────────────────────────────
+  1) 浏览器打开 http://127.0.0.1:5000/api/v1/health
+  2) F12 -> Console；如提示"请勿粘贴"，先手打 allow pasting 回车
+  3) 从素材 C 的「开始行」下一行起整段复制，粘到 Console 回车
+  4) 最后一行须为：合计 NN/NN 通过，0 项失败
+
+────────────────────────────────────────────────────────────
+[第 4 步] 数据库只读核查（见素材 B：s2_batch6_accept.sql.txt）
+────────────────────────────────────────────────────────────
+  全程仅 SELECT / SHOW / DESCRIBE；不 commit。
+  注意：第 4 步必须在**第 3 步跑完且未清理**时执行。
+  第 3 步脚本自带收尾清理；若需保留数据做第 4 步，
+  请先注释掉 Edge 脚本「收尾清理」段再执行。
+
+────────────────────────────────────────────────────────────
+[第 5 步] 导出临时文件**分批**清理（本批新增；沙箱按轮限额）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo
+  backend/.venv/Scripts/python.exe scripts/b6_cleanup_exports.py --precheck > .workbuddy/_b6clean_pre.txt 2>&1; echo "EXIT=$?"
+  backend/.venv/Scripts/python.exe scripts/b6_cleanup_exports.py --delete --max 10 > .workbuddy/_b6clean_del.txt 2>&1; echo "EXIT=$?"
+  backend/.venv/Scripts/python.exe scripts/b6_cleanup_exports.py --postcheck > .workbuddy/_b6clean_post.txt 2>&1; echo "EXIT=$?"
+
+  说明：沙箱存在**按轮累计删除预算**（阈值 50/轮）；超阈值会被拒并返回
+        SAFE_DELETE_BULK_REJECTED。因此不可一次性删完，须**分多轮、每轮 <= 50 项**
+        重复执行 --delete，直到 --postcheck 报告剩余 0。
+  边界：只处理 backend/storage/exports/ 内、文件名匹配 ^[0-9a-f]{32}\.(csv|json)$、
+        且未被**非测试账号** export_job 引用的文件；其余一律 SKIP 并列出。
+        不触碰生产代码 / 测试 / 报告 / 验收证据 / SEALED 文件 / 其它目录。
+
+────────────────────────────────────────────────────────────
+[第 6 步] 本批核验脚本（**唯一回归判定依据**）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo
+  backend/.venv/Scripts/python.exe scripts/verify_s2_batch6.py > .workbuddy/_b6verify.txt 2>&1; echo "EXIT=$?"
+  backend/.venv/Scripts/python.exe scripts/verify_s2_batch6.py --db > .workbuddy/_b6verify_db.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行  合计 NN/NN PASS，0 FAIL
+
+────────────────────────────────────────────────────────────
+[顺序约束]
+────────────────────────────────────────────────────────────
+  - 第 4 步之前**不得**清理（否则直查不到任务数据）；**重跑第 3 步之前必须先清理**。
+  - 第 1 / 2 / 3 步都会生成导出临时文件；清理只能**分轮**进行，不可绕过沙箱拦截。
+  - 第 6 步的 [D] 段以**本批开工点**（Step 0 预检报告 mtime）为界判定封板保护；
+    不得改写本批产物（app/__init__.py、export_service.py、exports.py、tests/batch6/**、
+    scripts/*batch6*、根目录 Edge 脚本）。

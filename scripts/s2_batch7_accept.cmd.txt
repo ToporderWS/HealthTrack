@@ -1,0 +1,81 @@
+【S2 第七批 D-01~D-02 数据总览 / 清空全部数据 · 人工验收 · 复制粘贴素材 A：启动与一键核验命令】
+
+口径提醒（本机硬约束）：
+  - Git Bash 基础命令（ls / grep / head / tail / cat / npx）大面积缺失；
+    本素材**不使用任何管道**，所有脚本自身落盘 stdout/stderr。
+  - 判定"是否执行成功"以【落盘产物 + 退出码】为准，**不以控制台是否为空为准**。
+  - 原有 S2 第一~第六批脚本/测试**不重跑、不修改**；本批回归判定**只用** verify_s2_batch7.py。
+  - **D-02 是破坏性操作**：所有验收只针对本批自建测试账号
+    （smoke: tstb7smokea / tstb7smokeb；Edge: tstb7edgea / tstb7edgeb）。
+    **绝不对任何非测试账号执行清空**。
+
+────────────────────────────────────────────────────────────
+[第 0 步] 启动后端（另开窗口，保持运行）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo/backend
+  ./.venv/Scripts/python.exe wsgi.py
+
+  校验：浏览器打开 http://127.0.0.1:5000/api/v1/health  ->  {"code":"OK",...}
+
+────────────────────────────────────────────────────────────
+[第 1 步] 本批自动化测试（90 项用例）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo/backend
+  ./.venv/Scripts/python.exe -m pytest tests/batch7 -q -p no:cacheprovider > ../.workbuddy/_b7test.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行形如  90 passed in NN.NNs
+
+────────────────────────────────────────────────────────────
+[第 2 步] 真实 HTTP 联调（双账号 -> 造数 -> D-01/D-02 -> 断言 -> 清理）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo
+  backend/.venv/Scripts/python.exe scripts/s2_batch7_http_smoke.py > .workbuddy/_b7smoke.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行  合计 NN/NN PASS，0 FAIL
+  说明：后端必须先启动（第 0 步）；脚本收尾会**白名单内**物理删除
+        tstb7smokea / tstb7smokeb 两个测试账号（含其业务数据）。
+
+────────────────────────────────────────────────────────────
+[第 3 步] 浏览器 Console 一键验收（见素材 C：s2_batch7_accept.console.txt）
+────────────────────────────────────────────────────────────
+  1) 浏览器打开 http://127.0.0.1:5000/api/v1/health
+  2) F12 -> Console；如提示"请勿粘贴"，先手打 allow pasting 回车
+  3) 从素材 C 的「开始行」下一行起整段复制，粘到 Console 回车
+  4) 最后一行须为：合计 NN/NN 通过，0 项失败（期望 74/74）
+
+  注意：Edge 脚本会创建 tstb7edgea / tstb7edgeb 并对其执行 D-02 清空；
+        账号无法用 API 删除，请用素材 B 第 3 段 SQL 收尾清理。
+
+────────────────────────────────────────────────────────────
+[第 4 步] 数据库只读核查（见素材 B：s2_batch7_accept.sql.txt）
+────────────────────────────────────────────────────────────
+  全程仅 SELECT / SHOW / DESCRIBE；不 commit。
+  注意：第 4 步必须在**第 3 步跑完且未清理**时执行（D-02 后的库内软删证据只在此时可见）。
+        若需保留数据做第 4 步，请先注释掉 Edge 脚本「收尾清理」段再执行。
+
+────────────────────────────────────────────────────────────
+[第 5 步] 本批核验脚本（**唯一回归判定依据**）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo
+  backend/.venv/Scripts/python.exe scripts/verify_s2_batch7.py > .workbuddy/_b7verify.txt 2>&1; echo "EXIT=$?"
+  backend/.venv/Scripts/python.exe scripts/verify_s2_batch7.py --db > .workbuddy/_b7verify_db.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行  合计 NN/NN PASS，0 FAIL
+
+────────────────────────────────────────────────────────────
+[第 6 步] 历史时点守卫脚本的**预期 FAIL**（勿当 bug 修）
+────────────────────────────────────────────────────────────
+  以下脚本把**当时**的接口集合硬编码，本批新增 /me/data/* 后必然 FAIL：
+    - scripts/verify_s2_batch6.py（第 173~186 行硬编码"接口 31 / 路径 24"，并禁止 /me/data 前缀）
+    - backend/tests/batch5/test_batch5_scope_guard.py（禁止范围含 /me/data）
+    - backend/tests/batch6/test_batch6_scope_guard.py（同上）
+  处置：**零改动 + 显式豁免**（历史时点判据）。本批回归判定只看 verify_s2_batch7.py。
+
+────────────────────────────────────────────────────────────
+[顺序约束]
+────────────────────────────────────────────────────────────
+  - 第 4 步之前**不得**清理测试账号（否则直查不到 D-02 软删证据）。
+  - 第 5 步的 [D] 段以**本批开工点**（Step 0 预检报告 mtime）为界判定封板保护；
+    不得改写本批产物（app/__init__.py、app/services/data_service.py、app/api/v1/data.py、
+    tests/batch7/**、scripts/*batch7*、根目录 Edge 脚本）。
+  - 本批**不新增数据库结构变更**：应仍为 9 表 / 17 非主键索引 / 0 外键 / 0001_initial_schema。

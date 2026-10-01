@@ -1,0 +1,169 @@
+【S2 第八批 A-07 注销账号 · 人工验收 · 复制粘贴素材 B：数据库只读核查 + 收尾清理】
+
+口径：
+  - 第 1~2 段：**只读**（SELECT / SHOW），不 commit、不改结构、不改任何业务数据。
+  - 第 3 段：**收尾清理**，仅针对本批测试账号（Edge: tstb8edgea / tstb8edgeb ，
+    以及全库 tst% 前缀残留），逐表 DELETE（非 TRUNCATE）。
+  - 数据库：kangji_healthtrack（MySQL 8.0.33）。
+  - 顺序：先跑素材 C（第 3 步）且**尚未清理**时执行第 1~2 段；第 3 段在核查完成后再执行。
+  - 索引统计**必须**用 COUNT(DISTINCT index_name)：information_schema.statistics
+    是"每索引每列一行"，裸 COUNT(*) 会得到 28（真实 17）。
+
+  - 结构事实（冻结，供比对）：
+      health_record       —— 含 is_deleted / deleted_at（A-07 须**含软删行**一并物理删除）；
+      record_tag          —— 含 is_deleted / deleted_at（须先于 health_record 删除）；
+      health_goal         —— 含 is_deleted / deleted_at / deleted_marker ；
+      user_profile        —— **没有** is_deleted / deleted_at（A-07 须**整行物理删除**，
+                             与 D-02 的"仅置空 6 个健康字段、保留昵称/性别/出生日期"严格区分）；
+      user_account / user_session / login_failure_state / export_job —— 均**无**软删列；
+      user_session        —— 失效标记是 revoked_at（**没有** is_revoked 列）；
+      login_failure_state —— 主键业务键是 username（**没有** user_id 列）；
+      export_job          —— file_path 可空；文件由服务端生成于 storage/exports/。
+
+════════════════════════════════════════════════════════════════
+第 0 段：连接
+════════════════════════════════════════════════════════════════
+USE kangji_healthtrack;
+
+════════════════════════════════════════════════════════════════
+第 1 段：结构指纹（应：9 表 / 17 非主键索引 / 0 外键 / 迁移 0001）
+         —— 本批**不得**产生任何结构变更（无 0002_*）
+════════════════════════════════════════════════════════════════
+SELECT COUNT(*) AS tables_cnt
+FROM information_schema.tables WHERE table_schema = DATABASE();
+
+SELECT COUNT(DISTINCT index_name) AS nonpk_index_cnt
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY';
+
+SELECT COUNT(*) AS fk_cnt
+FROM information_schema.table_constraints
+WHERE table_schema = DATABASE() AND constraint_type = 'FOREIGN KEY';
+
+SELECT version_num AS alembic_version FROM alembic_version;
+
+-- 1.1 user_profile：不得有软删列（A-07 是整行物理删除对象）
+SELECT COUNT(*) AS user_profile_softdelete_col_cnt
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = 'user_profile'
+  AND column_name IN ('is_deleted', 'deleted_at');
+
+-- 1.2 含软删列的三张业务表（A-07 须连软删行一并物理删除）
+SELECT table_name, column_name, column_type
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name IN ('health_record', 'record_tag', 'health_goal')
+  AND column_name IN ('is_deleted', 'deleted_at', 'deleted_marker')
+ORDER BY table_name, column_name;
+
+-- 1.3 无软删列的账号侧表
+SELECT table_name, COUNT(*) AS softdelete_col_cnt
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name IN ('user_account', 'user_session', 'login_failure_state', 'export_job')
+  AND column_name IN ('is_deleted', 'deleted_at')
+GROUP BY table_name;
+
+════════════════════════════════════════════════════════════════
+第 2 段：A-07 库侧证据（Edge 验收后**立即**执行）
+         —— 因 A-07 成功响应 data 恰 1 键（不返回条数），条数只能在此核查
+════════════════════════════════════════════════════════════════
+SET @b := (SELECT id FROM user_account WHERE username = 'tstb8edgeb');
+SELECT @b AS peer_id;   -- 期望非 NULL（对端必须仍在）
+
+-- 2.1 A-07 后主体账号应**已不存在**（Edge 会重新注册同名账号，故这里读的是"当前"账号）
+SELECT COUNT(*) AS edge_a_account_rows
+FROM user_account WHERE username = 'tstb8edgea';
+
+-- 2.2 全库 tst 前缀账号（期望为空；若有则说明仍有测试账号未清理）
+SELECT id, username, created_at FROM user_account
+WHERE username LIKE 'tst%' ORDER BY id;
+
+-- 2.3 非测试账号一律不应被波及（列出现有非 tst 账号）
+SELECT id, username, created_at FROM user_account
+WHERE username NOT LIKE 'tst%' ORDER BY id;
+
+-- 2.4 对端账号的业务数据应**完好保留**
+SELECT 'health_record' AS tbl, COUNT(*) AS rows_cnt FROM health_record WHERE user_id = @b
+UNION ALL SELECT 'record_tag',          COUNT(*) FROM record_tag          WHERE user_id = @b
+UNION ALL SELECT 'health_goal',         COUNT(*) FROM health_goal         WHERE user_id = @b
+UNION ALL SELECT 'user_profile',        COUNT(*) FROM user_profile        WHERE user_id = @b
+UNION ALL SELECT 'user_session',        COUNT(*) FROM user_session        WHERE user_id = @b
+UNION ALL SELECT 'export_job',          COUNT(*) FROM export_job          WHERE user_id = @b;
+
+-- 2.5 孤儿行扫描：任何 user_id 已不存在于 user_account 的业务行（A-07 后应无新增孤儿）
+SELECT 'health_record' AS tbl, COUNT(*) AS orphan_rows
+FROM health_record r LEFT JOIN user_account a ON a.id = r.user_id WHERE a.id IS NULL
+UNION ALL SELECT 'record_tag',  COUNT(*) FROM record_tag t
+  LEFT JOIN user_account a ON a.id = t.user_id WHERE a.id IS NULL
+UNION ALL SELECT 'health_goal', COUNT(*) FROM health_goal g
+  LEFT JOIN user_account a ON a.id = g.user_id WHERE a.id IS NULL
+UNION ALL SELECT 'user_profile', COUNT(*) FROM user_profile p
+  LEFT JOIN user_account a ON a.id = p.user_id WHERE a.id IS NULL
+UNION ALL SELECT 'user_session', COUNT(*) FROM user_session s
+  LEFT JOIN user_account a ON a.id = s.user_id WHERE a.id IS NULL
+UNION ALL SELECT 'export_job',  COUNT(*) FROM export_job e
+  LEFT JOIN user_account a ON a.id = e.user_id WHERE a.id IS NULL;
+
+-- 2.6 各表行数（清理前留痕）
+SELECT 'user_account'   AS tbl, COUNT(*) AS rows_cnt FROM user_account
+UNION ALL SELECT 'user_profile',        COUNT(*) FROM user_profile
+UNION ALL SELECT 'health_record',       COUNT(*) FROM health_record
+UNION ALL SELECT 'record_tag',          COUNT(*) FROM record_tag
+UNION ALL SELECT 'health_goal',         COUNT(*) FROM health_goal
+UNION ALL SELECT 'user_session',        COUNT(*) FROM user_session
+UNION ALL SELECT 'login_failure_state', COUNT(*) FROM login_failure_state
+UNION ALL SELECT 'export_job',          COUNT(*) FROM export_job;
+
+-- 2.7 文件侧证据无法用 SQL 获取，请在 OS 层核查（期望 0 文件）：
+--      dir backend\storage\exports
+--    并确认 backend\storage\cleanup_retry.jsonl 为空文件或不存在（T4 重试登记无遗留）。
+
+════════════════════════════════════════════════════════════════
+第 3 段：收尾清理（**仅**本批测试账号：tstb8edgea / tstb8edgeb + 全库 tst% 残留）
+         —— A-07 只注销**执行注销的那个账号**，故对端与 pytest/smoke 残留须在此收尾
+════════════════════════════════════════════════════════════════
+SET @a := (SELECT id FROM user_account WHERE username = 'tstb8edgea');
+SET @b := (SELECT id FROM user_account WHERE username = 'tstb8edgeb');
+SELECT @a AS edge_a_id, @b AS edge_b_id;   -- 清理前确认
+
+-- 3.1 去重后的 tst 账号 id 列表（安全做法：以 user_account 反查，不用通配符直接删业务表）
+SELECT GROUP_CONCAT(id) AS tst_ids FROM user_account WHERE username LIKE 'tst%';
+
+DELETE t FROM record_tag t            JOIN user_account a ON a.id = t.user_id WHERE a.username LIKE 'tst%';
+DELETE h FROM health_record h         JOIN user_account a ON a.id = h.user_id WHERE a.username LIKE 'tst%';
+DELETE g FROM health_goal g           JOIN user_account a ON a.id = g.user_id WHERE a.username LIKE 'tst%';
+DELETE p FROM user_profile p          JOIN user_account a ON a.id = p.user_id WHERE a.username LIKE 'tst%';
+DELETE e FROM export_job e            JOIN user_account a ON a.id = e.user_id WHERE a.username LIKE 'tst%';
+DELETE s FROM user_session s          JOIN user_account a ON a.id = s.user_id WHERE a.username LIKE 'tst%';
+DELETE FROM login_failure_state WHERE username LIKE 'tst%';
+DELETE FROM user_account WHERE username LIKE 'tst%';
+COMMIT;
+
+════════════════════════════════════════════════════════════════
+第 4 段：清理后自证
+════════════════════════════════════════════════════════════════
+SELECT COUNT(*) AS tst_accounts_left FROM user_account WHERE username LIKE 'tst%';
+
+SELECT COUNT(*) AS tst_records_left
+FROM health_record r JOIN user_account a ON a.id = r.user_id WHERE a.username LIKE 'tst%';
+
+SELECT COUNT(*) AS tst_goals_left
+FROM health_goal g JOIN user_account a ON a.id = g.user_id WHERE a.username LIKE 'tst%';
+
+SELECT COUNT(*) AS tst_login_fail_left
+FROM login_failure_state WHERE username LIKE 'tst%';
+
+SELECT COUNT(*) AS tst_export_jobs_left
+FROM export_job e JOIN user_account a ON a.id = e.user_id WHERE a.username LIKE 'tst%';
+
+-- 4.1 清理后结构未变（应仍为 9 / 17 / 0 / 0001_initial_schema）
+SELECT COUNT(*) AS tables_cnt FROM information_schema.tables WHERE table_schema = DATABASE();
+SELECT COUNT(DISTINCT index_name) AS nonpk_index_cnt FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY';
+SELECT COUNT(*) AS fk_cnt FROM information_schema.table_constraints
+WHERE table_schema = DATABASE() AND constraint_type = 'FOREIGN KEY';
+SELECT version_num FROM alembic_version;
+
+-- 4.2 非测试账号行数（不得因清理而减少）
+SELECT COUNT(*) AS non_tst_accounts FROM user_account WHERE username NOT LIKE 'tst%';

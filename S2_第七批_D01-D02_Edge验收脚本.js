@@ -1,0 +1,572 @@
+/* ============================================================================
+ * S2 第七批 D-01 ~ D-02（数据总览 / 清空全部数据）—— 浏览器 Edge 一键验收脚本
+ * ----------------------------------------------------------------------------
+ * 用法（**同源**，无 CORS）：
+ *   1) 先启动后端：cd backend && .venv/Scripts/python.exe wsgi.py
+ *   2) 浏览器打开 http://127.0.0.1:5000/api/v1/health
+ *   3) F12 -> Console；如提示“请勿粘贴”，先手打  allow pasting  回车
+ *   4) 从下面的【开始行】下一行起整段复制，粘到 Console 回车
+ *
+ * 【开始行】= 本行
+ * ============================================================================
+ *
+ * 设计约束（本机硬约束，务必遵守）：
+ *   - **零反引号**：不使用 ES6 模板字符串，全部改为字符串拼接
+ *     （“查看 -> 复制”链路会吞掉反引号，导致 missing ) after argument list）。
+ *   - **GET/HEAD 不携带 body**：fetch 对 GET 带 body 会直接抛 TypeError；
+ *     需要投递 JSON 体时一律换成 POST 投同一路径。
+ *   - 断言只描述“API 可证事实”；点名错误码时**同时**校验 code；
+ *     判 null 用 === null，不用 !x。
+ *   - 分组用 async 函数 + try/catch：**块内抛异常 = 该块剩余断言不执行、只压入 1 条 FAIL**
+ *     （因此报告里的“断言总数”必须在无异常时读取）。
+ *   - **D-02 是破坏性操作**：只对本脚本自建的 tstb7edgea / tstb7edgeb 执行清空，
+ *     绝不对任何非测试账号执行；收尾请用素材 B 第 3 段 SQL 清理这两个账号。
+ */
+(function () {
+  'use strict';
+
+  var BASE = location.origin + '/api/v1';
+  var PWD = 'Kangji2026';
+  var UA = 'tstb7edgea';   /* 本端 */
+  var UB = 'tstb7edgeb';   /* 对端 */
+
+  /* 冻结口径常量 */
+  var SUMMARY_KEYS = ['by_metric', 'goals', 'profile', 'total_records'];
+  var METRIC_ITEM_KEYS = ['count', 'first_recorded_at', 'last_recorded_at', 'metric_type'];
+  var CLEAR_KEYS = ['account_kept', 'deleted_goals', 'deleted_records', 'deleted_tags',
+                    'profile_health_fields_cleared', 'scope'];
+  var CLEAR_SCOPE = ['health_records', 'record_tags', 'goals', 'profile_health_fields'];
+  var CLEAR_MSG_3 = '已清除 3 条记录。账号保留，数据已按规则清除';
+  var CLEAR_MSG_0 = '已清除 0 条记录。账号保留，数据已按规则清除';
+  var GOALS_ZERO = { active_count: 0, paused_count: 0 };
+  var PROFILE_ZERO = { health_fields_filled: 0, health_fields_total: 6 };
+
+  var results = [];
+  var fails = [];
+  var recIdsA = [];
+  var tokenA = '';
+  var tokenB = '';
+
+  function say(text) {
+    console.log(text);
+  }
+
+  function ok(name, cond, detail) {
+    var pass = cond === true;
+    results.push({ name: name, pass: pass, detail: detail || '' });
+    if (!pass) {
+      fails.push(name + (detail ? '   -> ' + detail : ''));
+    }
+    say('  ' + (pass ? 'PASS' : 'FAIL') + '  ' + name + (pass ? '' : '   -> ' + detail));
+    return pass;
+  }
+
+  function okEq(name, actual, expect) {
+    var a = JSON.stringify(actual);
+    var e = JSON.stringify(expect);
+    return ok(name, a === e, '实际 ' + a + ' / 期望 ' + e);
+  }
+
+  function sortedKeys(obj) {
+    return Object.keys(obj || {}).sort();
+  }
+
+  function pad2(n) {
+    return (n < 10 ? '0' : '') + n;
+  }
+
+  /* 本地墙上时间（与 D-4 口径一致） */
+  function stamp(dayOffset, hour, minute) {
+    var d = new Date();
+    d.setDate(d.getDate() + dayOffset);
+    d.setHours(hour, minute, 0, 0);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' +
+           pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':00';
+  }
+
+  function dtSecs(text) {
+    if (!text) {
+      return null;
+    }
+    var m = String(text).match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (!m) {
+      return null;
+    }
+    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000;
+  }
+
+  /* ── HTTP：JSON 调用（GET/HEAD 一律不带 body） ─────────────────────────── */
+  function call(method, path, body, token, extraHeaders) {
+    var opt = { method: method, headers: {} };
+    var k;
+    if (extraHeaders) {
+      for (k in extraHeaders) {
+        if (Object.prototype.hasOwnProperty.call(extraHeaders, k)) {
+          opt.headers[k] = extraHeaders[k];
+        }
+      }
+    }
+    if (token) {
+      opt.headers.Authorization = 'Bearer ' + token;
+    }
+    if (body !== undefined && body !== null && method !== 'GET' && method !== 'HEAD') {
+      opt.headers['Content-Type'] = 'application/json';
+      opt.body = JSON.stringify(body);
+    }
+    return fetch(BASE + path, opt).then(function (resp) {
+      return resp.text().then(function (text) {
+        var parsed = null;
+        try {
+          parsed = text ? JSON.parse(text) : null;
+        } catch (e) {
+          parsed = null;
+        }
+        return { status: resp.status, body: parsed, text: text };
+      });
+    });
+  }
+
+  function dataOf(body) {
+    return (body && body.data) || {};
+  }
+
+  function codeOf(body) {
+    return (body && body.code) || '';
+  }
+
+  function msgOf(body) {
+    return (body && body.message) || '';
+  }
+
+  function boot(username) {
+    return call('POST', '/auth/register', { username: username, password: PWD,
+                                            agreement_version: 'v1.0',
+                                            agreement_accepted: true })
+      .then(function () {
+        return call('POST', '/auth/login', { username: username, password: PWD });
+      })
+      .then(function (r) {
+        return (dataOf(r.body).tokens || {}).access_token || '';
+      });
+  }
+
+  var CTX = { tW: stamp(-2, 9, 0), tH2O: stamp(-1, 9, 0), tMood: stamp(-1, 10, 0) };
+
+  /* ══════════════════════════════════════════════════════════════════════ */
+  async function group0Connect() {
+    var h = await call('GET', '/health');
+    ok('连通性：GET /api/v1/health 200 OK', h.status === 200 && codeOf(h.body) === 'OK',
+       'HTTP ' + h.status + ' ' + codeOf(h.body));
+
+    var u1 = await call('GET', '/me/data/summary');
+    ok('D-01 无 Token -> 401', u1.status === 401, 'HTTP ' + u1.status);
+
+    var u2 = await call('POST', '/me/data/clear', { confirm_text: '确认删除' });
+    ok('D-02 无 Token -> 401', u2.status === 401, 'HTTP ' + u2.status);
+
+    var q = await call('GET', '/me/data/summary?user_id=1', null, tokenA);
+    ok('D-01 query 携带 user_id -> 400 INVALID_PARAM',
+       q.status === 400 && codeOf(q.body) === 'INVALID_PARAM',
+       'HTTP ' + q.status + ' ' + codeOf(q.body));
+
+    var b = await call('POST', '/me/data/clear',
+                       { confirm_text: '确认删除', password: PWD,
+                         acknowledge_irreversible: true, user_id: 1 }, tokenA);
+    ok('D-02 body 携带 user_id -> 400 INVALID_PARAM',
+       b.status === 400 && codeOf(b.body) === 'INVALID_PARAM',
+       'HTTP ' + b.status + ' ' + codeOf(b.body));
+
+    var e = await call('GET', '/me/data/summary', null, tokenA);
+    okEq('统一 envelope：成功响应恰 4 键（code/message/data/request_id）',
+         sortedKeys(e.body), ['code', 'data', 'message', 'request_id']);
+    ok('统一 envelope：携带 X-Request-Id（响应体内 request_id 非空）',
+       typeof (e.body || {}).request_id === 'string' && e.body.request_id.length > 0,
+       String((e.body || {}).request_id));
+  }
+
+  async function group1EmptyD01() {
+    var r = await call('GET', '/me/data/summary', null, tokenA);
+    var d = dataOf(r.body);
+    ok('D-01 空数据 200 且 data 恰 4 键',
+       r.status === 200 && sortedKeys(d).join(',') === SUMMARY_KEYS.join(','),
+       'HTTP ' + r.status + ' ' + sortedKeys(d).join(','));
+    ok('D-01 空数据 total_records === 0', d.total_records === 0, String(d.total_records));
+    okEq('D-01 空数据 by_metric === []（不逐类返回 0 行）', d.by_metric, []);
+    okEq('D-01 空数据 goals 全 0', d.goals, GOALS_ZERO);
+    okEq('D-01 空数据 profile = 0/6', d.profile, PROFILE_ZERO);
+  }
+
+  async function group2Seed() {
+    var payloads = [
+      { metric_type: 'weight', value_1: 70.50, recorded_at: CTX.tW },
+      { metric_type: 'water', value_1: 500, recorded_at: CTX.tH2O },
+      { metric_type: 'mood', value_1: 4, tags: ['relaxed', 'focused'], recorded_at: CTX.tMood }
+    ];
+    for (var i = 0; i < payloads.length; i++) {
+      var r = await call('POST', '/records', payloads[i], tokenA);
+      if (r.status !== 201) {
+        throw new Error('R-01 写入失败 HTTP ' + r.status + ' ' + codeOf(r.body));
+      }
+      recIdsA.push(dataOf(r.body).record.id);
+    }
+    ok('造数：本端 3 条活跃记录（weight/water/mood+tags）', recIdsA.length === 3,
+       String(recIdsA.length));
+
+    var v = await call('POST', '/records',
+                       { metric_type: 'water', value_1: 700, recorded_at: stamp(-3, 9, 0) }, tokenA);
+    var victim = dataOf(v.body).record.id;
+    var del = await call('DELETE', '/records/' + victim, null, tokenA);
+    ok('造数：软删 1 条 water（HTTP 200）', del.status === 200, 'HTTP ' + del.status);
+    ok('造数：软删记录不入 recIdsA（按 API 事实比对）', recIdsA.indexOf(victim) < 0);
+
+    var p = await call('PUT', '/profile', {
+      nickname: '冒烟甲', gender: 1, birth_date: '1990-05-20',
+      height_cm: 175, initial_weight_kg: null, blood_type: 'A',
+      medical_history: '无', allergy_history: null, medication_notes: null,
+      acknowledge_warnings: true
+    }, tokenA);
+    ok('造数：P-02 档案 3/6 健康字段 + 昵称/性别/出生日期', p.status === 200,
+       'HTTP ' + p.status + ' ' + codeOf(p.body));
+
+    var g1 = await call('POST', '/goals',
+                        { goal_type: 'water', target_value: 2000, acknowledge_warnings: true },
+                        tokenA);
+    ok('造数：G-02 建 water 目标 -> 201', g1.status === 201,
+       'HTTP ' + g1.status + ' ' + codeOf(g1.body));
+
+    var g2 = await call('POST', '/goals',
+                        { goal_type: 'sport', attr_1: 'count', target_value: 3,
+                          acknowledge_warnings: true }, tokenA);
+    var sportId = (dataOf(g2.body).goal || {}).id;
+    ok('造数：G-02 建 sport 目标 -> 201', g2.status === 201 && !!sportId,
+       'HTTP ' + g2.status + ' id=' + sportId);
+
+    var g3 = await call('POST', '/goals/' + sportId + '/pause', null, tokenA);
+    ok('造数：G-04 暂停 sport 目标 -> 200', g3.status === 200,
+       'HTTP ' + g3.status + ' ' + codeOf(g3.body));
+  }
+
+  async function group3D01() {
+    var r = await call('GET', '/me/data/summary', null, tokenA);
+    var d = dataOf(r.body);
+    ok('D-01 200 且 data 恰 4 键（total_records/by_metric/goals/profile）',
+       r.status === 200 && sortedKeys(d).join(',') === SUMMARY_KEYS.join(','),
+       'HTTP ' + r.status + ' ' + sortedKeys(d).join(','));
+    ok('D-01 total_records === 3（软删 1 条不计入）', d.total_records === 3,
+       String(d.total_records));
+
+    var items = d.by_metric || [];
+    ok('D-01 by_metric 恰 3 项（只返回有数据的指标）', items.length === 3, String(items.length));
+    ok('D-01 by_metric 每项恰 4 键', items.length === 3 &&
+       items.every(function (it) { return sortedKeys(it).join(',') === METRIC_ITEM_KEYS.join(','); }),
+       items.length ? sortedKeys(items[0]).join(',') : '[]');
+    okEq('D-01 by_metric 按 METRIC_TYPES 固定顺序（weight/water/mood）',
+         items.map(function (it) { return it.metric_type; }), ['weight', 'water', 'mood']);
+    okEq('D-01 by_metric count 各为 1（软删 water 不计入）',
+         items.map(function (it) { return it.count; }), [1, 1, 1]);
+    ok('D-01 weight first/last recorded_at === 造数时间（格式冻结）',
+       items.length === 3 && items[0].first_recorded_at === CTX.tW &&
+       items[0].last_recorded_at === CTX.tW && dtSecs(items[0].first_recorded_at) !== null,
+       JSON.stringify(items[0]));
+    okEq('D-01 goals = active 1 / paused 1（软删目标不计入）',
+         d.goals, { active_count: 1, paused_count: 1 });
+    okEq('D-01 profile = 3/6（昵称/性别/出生日期不计入）',
+         d.profile, { health_fields_filled: 3, health_fields_total: 6 });
+
+    var dump = JSON.stringify(d);
+    ok('D-01 响应无任何数值统计字段（value_* / avg / sum / max / min / unit）',
+       dump.indexOf('value_1') < 0 && dump.indexOf('value_2') < 0 &&
+       dump.indexOf('"unit"') < 0 && dump.indexOf('avg') < 0 &&
+       dump.indexOf('"sum"') < 0 && dump.indexOf('"max"') < 0 && dump.indexOf('"min"') < 0);
+
+    var again = await call('GET', '/me/data/summary', null, tokenA);
+    ok('D-01 GET 幂等（两次响应一致）',
+       JSON.stringify(dataOf(again.body)) === dump);
+  }
+
+  async function group4PeerIsolation() {
+    var seed = await call('POST', '/records',
+                          { metric_type: 'weight', value_1: 60, recorded_at: stamp(-1, 8, 0) },
+                          tokenB);
+    ok('对端造数：1 条活跃记录 -> 201', seed.status === 201, 'HTTP ' + seed.status);
+
+    var rb = await call('GET', '/me/data/summary', null, tokenB);
+    var db = dataOf(rb.body);
+    ok('隔离：对端 total_records === 1（看不到本端 3 条）', db.total_records === 1,
+       String(db.total_records));
+    okEq('隔离：对端 by_metric 仅 weight',
+         (db.by_metric || []).map(function (it) { return it.metric_type; }), ['weight']);
+    okEq('隔离：对端 goals 全 0', db.goals, GOALS_ZERO);
+
+    var ra = await call('GET', '/me/data/summary', null, tokenA);
+    ok('隔离：本端 total_records 仍 === 3（对端写入不影响本端）',
+       dataOf(ra.body).total_records === 3, String(dataOf(ra.body).total_records));
+  }
+
+  async function group5ClearNegative() {
+    var c1 = await call('POST', '/me/data/clear',
+                        { confirm_text: '确认', password: PWD, acknowledge_irreversible: true },
+                        tokenA);
+    ok('D-02 confirm_text 不为「确认删除」-> 422 VALIDATION_FAILED',
+       c1.status === 422 && codeOf(c1.body) === 'VALIDATION_FAILED',
+       'HTTP ' + c1.status + ' ' + codeOf(c1.body));
+
+    var c2 = await call('POST', '/me/data/clear',
+                        { password: PWD, acknowledge_irreversible: true }, tokenA);
+    ok('D-02 缺 confirm_text -> 422', c2.status === 422 && codeOf(c2.body) === 'VALIDATION_FAILED',
+       'HTTP ' + c2.status + ' ' + codeOf(c2.body));
+
+    var c3 = await call('POST', '/me/data/clear',
+                        { confirm_text: '确认删除', password: PWD }, tokenA);
+    ok('D-02 缺 acknowledge_irreversible -> 422',
+       c3.status === 422 && codeOf(c3.body) === 'VALIDATION_FAILED',
+       'HTTP ' + c3.status + ' ' + codeOf(c3.body));
+
+    var c4 = await call('POST', '/me/data/clear',
+                        { confirm_text: '确认删除', password: PWD,
+                          acknowledge_irreversible: false }, tokenA);
+    ok('D-02 acknowledge_irreversible === false -> 422',
+       c4.status === 422 && codeOf(c4.body) === 'VALIDATION_FAILED',
+       'HTTP ' + c4.status + ' ' + codeOf(c4.body));
+
+    var c5 = await call('POST', '/me/data/clear',
+                        { confirm_text: '确认删除', password: PWD,
+                          acknowledge_irreversible: 'true' }, tokenA);
+    ok('D-02 acknowledge_irreversible 字符串 "true" -> 422（必须布尔 true）',
+       c5.status === 422 && codeOf(c5.body) === 'VALIDATION_FAILED',
+       'HTTP ' + c5.status + ' ' + codeOf(c5.body));
+
+    var c6 = await call('POST', '/me/data/clear',
+                        { confirm_text: '确认删除', acknowledge_irreversible: true }, tokenA);
+    ok('D-02 缺 password -> 422 VALIDATION_FAILED',
+       c6.status === 422 && codeOf(c6.body) === 'VALIDATION_FAILED',
+       'HTTP ' + c6.status + ' ' + codeOf(c6.body));
+
+    var chk = await call('GET', '/me/data/summary', null, tokenA);
+    ok('D-02 六次确认失败后**数据未变**（total_records 仍 3）',
+       dataOf(chk.body).total_records === 3, String(dataOf(chk.body).total_records));
+  }
+
+  async function group6ClearPassword() {
+    var w1 = await call('POST', '/me/data/clear',
+                        { confirm_text: '确认删除', password: 'WrongPass1',
+                          acknowledge_irreversible: true }, tokenA);
+    ok('D-02 密码错误第 1 次 -> 422 PASSWORD_INVALID',
+       w1.status === 422 && codeOf(w1.body) === 'PASSWORD_INVALID',
+       'HTTP ' + w1.status + ' ' + codeOf(w1.body));
+
+    var w3 = await call('POST', '/me/data/clear',
+                        { confirm_text: '确认删除', password: 'WrongPass3',
+                          acknowledge_irreversible: true }, tokenA);
+    ok('D-02 密码错误第 3 次 -> 422（**不返回** 429 SESSION_VERIFY_ABORTED）',
+       w3.status === 422 && codeOf(w3.body) === 'PASSWORD_INVALID',
+       'HTTP ' + w3.status + ' ' + codeOf(w3.body));
+
+    var w5 = await call('POST', '/me/data/clear',
+                        { confirm_text: '确认删除', password: 'WrongPass5',
+                          acknowledge_irreversible: true }, tokenA);
+    ok('D-02 密码错误第 5 次 -> 422（无锁定、不累计失败次数）',
+       w5.status === 422 && codeOf(w5.body) === 'PASSWORD_INVALID',
+       'HTTP ' + w5.status + ' ' + codeOf(w5.body));
+
+    var chk = await call('GET', '/me/data/summary', null, tokenA);
+    ok('D-02 连续 5 次密码错误后**数据未变**（total_records 仍 3）',
+       dataOf(chk.body).total_records === 3, String(dataOf(chk.body).total_records));
+
+    var re = await call('POST', '/auth/login', { username: UA, password: PWD });
+    ok('D-02 密码错误**不影响登录**（同密码仍 200，验证未触发锁定）',
+       re.status === 200, 'HTTP ' + re.status + ' ' + codeOf(re.body));
+    tokenA = (dataOf(re.body).tokens || {}).access_token || '';
+
+    var me = await call('GET', '/users/me', null, tokenA);
+    ok('D-02 重新登录后新 Token 可用（GET /users/me 200）', me.status === 200,
+       'HTTP ' + me.status + ' ' + codeOf(me.body));
+  }
+
+  async function group7ClearSuccess() {
+    var r = await call('POST', '/me/data/clear',
+                       { confirm_text: '确认删除', password: PWD,
+                         acknowledge_irreversible: true }, tokenA);
+    var d = dataOf(r.body);
+    okEq('D-02 成功响应 envelope 恰 4 键', sortedKeys(r.body),
+         ['code', 'data', 'message', 'request_id']);
+    okEq('D-02 data 恰 6 键（无 soft_warning / warnings）', sortedKeys(d), CLEAR_KEYS);
+    ok('D-02 deleted_records === 3', d.deleted_records === 3, String(d.deleted_records));
+    ok('D-02 deleted_tags === 2（随主记录同步软删）', d.deleted_tags === 2, String(d.deleted_tags));
+    ok('D-02 deleted_goals === 2', d.deleted_goals === 2, String(d.deleted_goals));
+    ok('D-02 profile_health_fields_cleared === 3',
+       d.profile_health_fields_cleared === 3, String(d.profile_health_fields_cleared));
+    ok('D-02 account_kept === true（账号保留）', d.account_kept === true, String(d.account_kept));
+    okEq('D-02 scope 逐字逐序冻结（C5）', d.scope, CLEAR_SCOPE);
+    ok('D-02 成功文案冻结形态：' + CLEAR_MSG_3, msgOf(r.body) === CLEAR_MSG_3, msgOf(r.body));
+
+    var me = await call('GET', '/users/me', null, tokenA);
+    ok('D-02 后原 Access Token 仍可用（会话未被清）', me.status === 200,
+       'HTTP ' + me.status + ' ' + codeOf(me.body));
+    ok('D-02 后账号仍在（GET /users/me 返回本人 username）',
+       dataOf(me.body).username === UA, String(dataOf(me.body).username));
+  }
+
+  async function group8AfterD01() {
+    var r = await call('GET', '/me/data/summary', null, tokenA);
+    var d = dataOf(r.body);
+    ok('D-02 后 D-01：total_records === 0', d.total_records === 0, String(d.total_records));
+    okEq('D-02 后 D-01：by_metric === []', d.by_metric, []);
+    okEq('D-02 后 D-01：goals 全 0', d.goals, GOALS_ZERO);
+    okEq('D-02 后 D-01：profile = 0/6', d.profile, PROFILE_ZERO);
+  }
+
+  async function group9SecondClear() {
+    var r = await call('POST', '/me/data/clear',
+                       { confirm_text: '确认删除', password: PWD,
+                         acknowledge_irreversible: true }, tokenA);
+    var d = dataOf(r.body);
+    ok('D-02 二次执行 200 且四类计数全 0',
+       r.status === 200 && d.deleted_records === 0 && d.deleted_tags === 0 &&
+       d.deleted_goals === 0 && d.profile_health_fields_cleared === 0,
+       'HTTP ' + r.status + ' ' + JSON.stringify([d.deleted_records, d.deleted_tags,
+                                                  d.deleted_goals,
+                                                  d.profile_health_fields_cleared]));
+    ok('D-02 二次执行文案：' + CLEAR_MSG_0, msgOf(r.body) === CLEAR_MSG_0, msgOf(r.body));
+  }
+
+  async function group10PeerClearExtra() {
+    var ra = await call('GET', '/me/data/summary', null, tokenB);
+    ok('隔离：本端清空**不影响**对端（对端 total_records 仍 1）',
+       dataOf(ra.body).total_records === 1, String(dataOf(ra.body).total_records));
+
+    var r = await call('POST', '/me/data/clear',
+                       { confirm_text: '确认删除', password: PWD,
+                         acknowledge_irreversible: true,
+                         include_profile_row: true, delete_account: true,
+                         include_sessions: true, force: true }, tokenB);
+    var d = dataOf(r.body);
+    ok('D-02 范围扩展参数（include_profile_row/delete_account/…）**无任何效果**（仍清 1 条）',
+       r.status === 200 && d.deleted_records === 1, 'HTTP ' + r.status + ' ' +
+       String(d.deleted_records));
+    ok('D-02 扩展参数下 account_kept 仍 === true', d.account_kept === true, String(d.account_kept));
+
+    var me = await call('GET', '/users/me', null, tokenB);
+    ok('D-02 扩展参数下对端账号**未被删除**（GET /users/me 200）', me.status === 200,
+       'HTTP ' + me.status + ' ' + codeOf(me.body));
+
+    var qa = await call('GET', '/me/data/summary', null, tokenA);
+    ok('隔离：对端清空**不影响**本端（本端仍 0）',
+       dataOf(qa.body).total_records === 0, String(dataOf(qa.body).total_records));
+  }
+
+  async function group11Leak() {
+    var r = await call('GET', '/me/data/summary', null, tokenA);
+    var t = JSON.stringify(r.body || {});
+    ok('D-01 载荷不含 file_path / password / secret / token',
+       t.indexOf('file_path') < 0 && t.indexOf('password') < 0 &&
+       t.indexOf('secret') < 0 && t.indexOf('token') < 0);
+
+    var c = await call('POST', '/me/data/clear',
+                       { confirm_text: '确认', password: PWD, acknowledge_irreversible: true },
+                       tokenA);
+    ok('错误响应 envelope：四必备键齐备 + data === null（errors 为可选键）',
+       ['code', 'data', 'message', 'request_id'].every(function (k) {
+         return Object.prototype.hasOwnProperty.call(c.body || {}, k);
+       }) && (c.body || {}).data === null && Array.isArray((c.body || {}).errors),
+       'HTTP ' + c.status + ' ' + sortedKeys(c.body).join(','));
+
+    ok('错误响应不泄漏内部细节（无 File "/" / Traceback / sqlalchemy）',
+       JSON.stringify(c.body || {}).indexOf('File "') < 0 &&
+       JSON.stringify(c.body || {}).indexOf('Traceback') < 0 &&
+       JSON.stringify(c.body || {}).indexOf('sqlalchemy') < 0);
+  }
+
+  async function cleanup() {
+    var n = 0;
+    for (var i = 0; i < recIdsA.length; i++) {
+      var r = await call('DELETE', '/records/' + recIdsA[i], null, tokenA);
+      if (r.status === 200) {
+        n++;
+      }
+    }
+    say('  收尾：本端记录已软删 ' + n + ' 条（其余已由 D-02 软删；'
+        + '测试账号请用素材 B 第 3 段 SQL 清理 tstb7edgea / tstb7edgeb）');
+  }
+
+  async function run() {
+    say('=====================================================================');
+    say('S2 第七批 D-01~D-02（数据总览 / 清空全部数据）· Edge 一键验收');
+    say('目标后端：' + BASE + '    账号：' + UA + ' / ' + UB);
+    say('=====================================================================');
+
+    try {
+      await group0Connect();
+      if (results[0].pass !== true) {
+        say('  [STOP] 连通性失败，后端未就绪：cd backend && .venv/Scripts/python.exe wsgi.py');
+        report();
+        return;
+      }
+
+      tokenA = await boot(UA);
+      tokenB = await boot(UB);
+      ok('双账号就绪（tstb7edgea 本端 / tstb7edgeb 对端）', !!tokenA && !!tokenB);
+      if (!tokenA || !tokenB) {
+        say('  [STOP] 账号登录失败，无法继续。');
+        report();
+        return;
+      }
+
+      var groups = [
+        ['1. 空数据 D-01（本端初始态）', group1EmptyD01],
+        ['2. 本端造数（3 活跃 + 1 软删 + 档案 3/6 + 2 目标）', group2Seed],
+        ['3. D-01 数据总览契约', group3D01],
+        ['4. D-01 双账号隔离', group4PeerIsolation],
+        ['5. D-02 三重确认反向', group5ClearNegative],
+        ['6. D-02 密码错误（无 429 / 无锁定）', group6ClearPassword],
+        ['7. D-02 清空成功（4 类范围 + 保留账号）', group7ClearSuccess],
+        ['8. 清空后 D-01 归零', group8AfterD01],
+        ['9. D-02 二次执行（幂等语义）', group9SecondClear],
+        ['10. 越权隔离 + 范围扩展参数无效', group10PeerClearExtra],
+        ['11. 字段泄漏与错误 envelope 扫描', group11Leak]
+      ];
+      for (var i = 0; i < groups.length; i++) {
+        say('');
+        say('── ' + groups[i][0] + ' ' + '─'.repeat(6));
+        try {
+          await groups[i][1]();
+        } catch (err) {
+          ok('【' + groups[i][0] + '】块内异常', false, String(err));
+        }
+      }
+    } catch (err) {
+      ok('顶层执行异常', false, String(err));
+    } finally {
+      try {
+        await cleanup();
+      } catch (err2) {
+        say('  [WARN] 收尾异常：' + String(err2));
+      }
+      report();
+    }
+  }
+
+  function report() {
+    var passed = 0;
+    for (var i = 0; i < results.length; i++) {
+      if (results[i].pass) {
+        passed++;
+      }
+    }
+    say('');
+    say('=====================================================================');
+    say('  合计 ' + passed + '/' + results.length + ' 通过，' + (results.length - passed) + ' 项失败');
+    say('  结论：' + (passed === results.length ? '全部通过' : '存在失败项'));
+    if (results.length - passed > 0) {
+      say('  失败项：');
+      for (var j = 0; j < fails.length; j++) {
+        say('    - ' + fails[j]);
+      }
+    }
+    say('  提醒：D-02 只对本脚本自建测试账号执行；请执行素材 B 第 3 段 SQL 清理');
+    say('        tstb7edgea / tstb7edgeb 两个测试账号及其业务数据。');
+    say('=====================================================================');
+  }
+
+  run();
+})();

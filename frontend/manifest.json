@@ -1,0 +1,40 @@
+{
+    "name" : "康迹",
+    "appid" : "__UNI__B882651",
+    "description" : "康迹 HealthTrack —— 个人健康记录与趋势查看工具（非医疗器械，不提供诊断或医疗建议）",
+    "versionName" : "0.1.0",
+    "versionCode" : "100",
+    "transformPx" : false,
+    "vueVersion" : "3",
+    "uniStatistics" : {
+        "enable" : false
+    },
+    "app-plus" : {
+        "usingComponents" : true,
+        "nvueStyleCompiler" : "uni-app",
+        "compilerVersion" : 3,
+        "splashscreen" : {
+            "alwaysShowBeforeRender" : true,
+            "waiting" : true,
+            "autoclose" : true,
+            "delay" : 0
+        },
+        "modules" : {},
+        "distribute" : {
+            "android" : {
+                "permissions" : [ "<uses-permission android:name=\"android.permission.CAMERA\"/>" ],
+                "packagename" : "com.kangji.healthtrack"
+            },
+            "ios" : {
+                "dSYMs" : false
+            },
+            "sdkConfigs" : {}
+        }
+    },
+    "quickapp" : {},
+    "h5" : {
+        "router" : {
+            "base" : "./"
+        }
+    }
+}

@@ -1,0 +1,88 @@
+-- ============================================================================
+-- S2 第五批 S-01~S-03 人工验收 · 复制粘贴素材 B：数据库只读核查（第 3 步）
+-- 依据：开工方案 §十六（10 项）
+-- 纪律：**仅 SELECT / SHOW / DESCRIBE**；不写、不改、不删、不 commit。
+-- 前置：刚跑完第 2 步 Console 一键验收，且**未清理**。
+-- 库名：kangji_healthtrack      账号：kangji_dev
+-- ============================================================================
+
+-- [1] 环境确认
+SELECT DATABASE() AS db_name, VERSION() AS db_version;
+SELECT @@tx_isolation AS isolation_level, @@global.time_zone AS gtz, @@session.time_zone AS stz;
+
+-- [2] 结构确认（本批 0 结构变更）
+DESCRIBE health_record;
+DESCRIBE record_tag;
+DESCRIBE health_goal;
+DESCRIBE user_profile;
+
+-- [3] 迁移基线（必须 = 0001_initial_schema）
+SELECT version_num FROM alembic_version;
+
+-- [4] 隔离：两账号按 user_id 分组行数（对端必须为 0 行）
+SELECT u.username, u.id AS user_id,
+       (SELECT COUNT(*) FROM health_record r WHERE r.user_id = u.id) AS records,
+       (SELECT COUNT(*) FROM health_goal   g WHERE g.user_id = u.id) AS goals,
+       (SELECT COUNT(*) FROM record_tag    t WHERE t.user_id = u.id) AS tags
+FROM user_account u
+WHERE u.username IN ('acctest01', 'acctest02')
+ORDER BY u.username;
+
+-- [5] 软删过滤：确认存在 is_deleted=1 行，且其**未参与**接口聚合
+SELECT metric_type, is_deleted, COUNT(*) AS rows_cnt
+FROM health_record
+WHERE user_id = (SELECT id FROM user_account WHERE username = 'acctest01')
+GROUP BY metric_type, is_deleted
+ORDER BY metric_type, is_deleted;
+
+-- [6] 半开边界：直查边界日记录（start 当天 00:00:00 / end 当天 23:59:59 / 次日 00:00:00）
+SELECT id, metric_type, value_1, recorded_at, is_deleted
+FROM health_record
+WHERE user_id = (SELECT id FROM user_account WHERE username = 'acctest01')
+  AND metric_type = 'water'
+ORDER BY recorded_at ASC, id ASC;
+
+-- [7] 缺失日期：S-02 points 应恰为有记录日集合（不多不少）
+SELECT DATE(recorded_at) AS day, metric_type, COUNT(*) AS rows_cnt
+FROM health_record
+WHERE user_id = (SELECT id FROM user_account WHERE username = 'acctest01')
+  AND is_deleted = 0
+GROUP BY DATE(recorded_at), metric_type
+ORDER BY day, metric_type;
+
+-- [8] 日聚合：同日多条明细 -> 核对 weight 取最后一次、其余当日平均/累计
+SELECT metric_type, DATE(recorded_at) AS day, id, value_1, value_2, recorded_at
+FROM health_record
+WHERE user_id = (SELECT id FROM user_account WHERE username = 'acctest01')
+  AND metric_type IN ('weight', 'water', 'sport', 'mood')
+  AND is_deleted = 0
+ORDER BY metric_type, day, recorded_at ASC, id ASC;
+
+-- [9] 权重链：自设目标（weight / water / sleep）-> 核对 target_line / reached_rate_percent
+SELECT id, user_id, goal_type, target_value, unit, status, is_deleted, deleted_marker,
+       start_weight_kg, start_date, target_date
+FROM health_goal
+WHERE user_id = (SELECT id FROM user_account WHERE username = 'acctest01')
+ORDER BY goal_type, id;
+
+-- [10] 结构指纹：9 表 / 17 非主键索引 / 0 外键（核验前后必须一致）
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = DATABASE() ORDER BY table_name;
+
+SELECT COUNT(DISTINCT index_name) AS non_primary_indexes
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY';
+
+SELECT COUNT(*) AS foreign_keys
+FROM information_schema.table_constraints
+WHERE table_schema = DATABASE() AND constraint_type = 'FOREIGN KEY';
+
+-- [附] 业务表行数（清理后应全部为 0）
+SELECT 'user_account' AS t, COUNT(*) AS rows_cnt FROM user_account
+UNION ALL SELECT 'user_profile', COUNT(*) FROM user_profile
+UNION ALL SELECT 'health_record', COUNT(*) FROM health_record
+UNION ALL SELECT 'record_tag', COUNT(*) FROM record_tag
+UNION ALL SELECT 'health_goal', COUNT(*) FROM health_goal
+UNION ALL SELECT 'user_session', COUNT(*) FROM user_session
+UNION ALL SELECT 'login_failure_state', COUNT(*) FROM login_failure_state
+UNION ALL SELECT 'export_job', COUNT(*) FROM export_job;

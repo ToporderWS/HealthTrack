@@ -1,0 +1,510 @@
+<template>
+    <!--
+      C-23 TrendChartContainer（趋势图表容器 / 状态宿主；DESIGN.md §8.3 已登记）
+
+      规格（DESIGN.md §8.3 + §9 + §10.2 + S1-C SC-11 ④⑩⑪⑫⑭）：
+        宽 = `var(--chart-w)`、高 = `var(--chart-h)`；**禁写死 px 宽**（§9）。
+        状态宿主：正常 / 加载 / 空 / `<2 条` / 失败 / 离线命中 / 离线未命中
+                + **切换中（保留旧图 + 淡加载）**。
+
+      ★ 本组件只做「画什么 / 画成什么样」，**不发起任何请求**：
+        数据与状态由宿主页 SC-11 持有并传入（这样"切换时保留旧图"才成立 ——
+        旧图来自页面持有的旧载荷，而不是本组件的内部缓存）。
+
+      ★ 颜色纪律（DESIGN.md §2.5 / §9）：
+        全部 8 类指标共用同一色相；**按指标换色 = 违规**；**不存在第 9 个图表颜色**。
+        色值一律由 `utils/chartTheme.js` 从运行时令牌（`App.vue` 的 `--x`）读取，
+        本组件与 `chartTheme.js` **都不写任何字面色值**。
+
+      ★ 令牌通道（S3-9 3.3 第4步 实测新增）：
+        App 逻辑层**没有 DOM**，`getComputedStyle` 读不到令牌 ⇒ 真机上 uCharts 收到空色值，
+        而 canvas 对空串赋值是 no-op（保持上一个成功设定的值）⇒ 柱体残留 `#666666`、
+        折线残留 `#cccccc`（这才是"整图偏深灰"的真因，不是配色选错）。
+        ⇒ 本组件用 **renderjs** 在**视图层**枚举 CSS 自定义属性并回传（见文件末 `chartTokenBridge`），
+          由 `chartTheme.readToken(name, snapshot)` 兜底。**单一真相源不变**（仍是 `App.vue` 的 `--x`），
+          **不复制任何色值、不新增颜色体系**。
+        ★ H5 不受影响：逻辑层 DOM 直读成功 ⇒ 不触发视图层枚举，取值来源与绘制次数与改动前一致。
+
+      ★ 数据诚实性（DESIGN.md §9①②）：
+        缺失日期由 `chartTheme.buildChartData` 填 `null`（不补 0 / 不插值），
+        折线在 `connectNulls: false` 下**真实断开**；柱状图遇 `null` **不画零高柱**。
+
+      ★ 第三方图表库：`qiun-data-charts`（uCharts）—— DESIGN.md §9 冻结的唯一图表库，
+        S3-4 批次以 `uni_modules` 形式安装。**未启用 ECharts 渲染分支**
+        （不传 `echartsH5` / `echartsApp`），故不会加载其 `static/**/echarts.min.js`。
+
+      ★ 离线态的分工（如实登记，避免重复语义）：
+        「离线数据 · 更新于 <时间>」离线条按 DESIGN.md §10.1 页面骨架由**宿主页**渲染；
+        本组件负责"离线时画什么"：命中缓存 → 正常只读渲染；未命中 → `state = 'empty'`
+        （由页面判定并传入，本组件不自行探测缓存）。
+
+      八态：default（正常）/ loading（骨架，慢加载追加一行提示）/ empty（「该时间段还没有记录」）/
+            error（失败 + 重试）/ offline（由 empty 承载：缓存未命中）/
+            pressed · disabled · success —— **N/A**
+            （本组件是只读图表宿主，无按下 / 禁用 / 成功语义；
+             「切换中」以 `switching` 表达，属 loading 的持续态而非独立状态。）
+    -->
+    <view class="tchart" :tokenProbe="tokenProbe" :change:tokenProbe="chartTokenBridge.onProbe">
+        <!-- 失败：图表区失败组件 + 重试入口（**不清空指标切换器**由页面保证） -->
+        <view v-if="state === 'error'" class="tchart__state">
+            <AppErrorState
+                variant="inline"
+                :text="errorText"
+                retry-text="重试"
+                @retry="onRetry"
+            />
+        </view>
+
+        <!-- 首屏加载：图表区骨架（禁整页白屏） -->
+        <view v-else-if="state === 'loading'" class="tchart__state">
+            <AppSkeleton variant="chart" />
+            <!-- DESIGN.md §7④：> 8s 追加「仍在加载，请稍候」 -->
+            <text v-if="slowLoading" class="tchart__slow">{{ SLOW_TEXT }}</text>
+        </view>
+
+        <!-- 该时间段无记录 -->
+        <view v-else-if="state === 'empty'" class="tchart__state">
+            <AppEmpty variant="common" :text="emptyText" :show-action="false" />
+        </view>
+
+        <!-- 记录数 < 2：只提示，不画不存在的趋势 -->
+        <view v-else-if="state === 'insufficient'" class="tchart__state">
+            <AppEmpty variant="common" :text="insufficientText" :show-action="false" />
+        </view>
+
+        <!-- 正常 / 切换中 -->
+        <view v-else class="tchart__canvas">
+            <qiun-data-charts
+                :type="chartType"
+                :chart-data="chartData"
+                :opts="chartOpts"
+                :background="backgroundColor"
+                :error-show="true"
+            />
+
+            <!-- 切换中：保留旧图 + 淡加载指示（避免闪白） -->
+            <view v-if="switching" class="tchart__switching">
+                <view class="tchart__spinner"></view>
+                <text class="tchart__switching-text">{{ switchingText }}</text>
+            </view>
+        </view>
+    </view>
+</template>
+
+<script>
+import AppSkeleton from './AppSkeleton.vue'
+import AppEmpty from './AppEmpty.vue'
+import AppErrorState from './AppErrorState.vue'
+
+// 第三方图表库（DESIGN.md §9 冻结；uni_modules 形式，按相对路径显式引入以避免歧义）
+import qiunDataCharts from '../uni_modules/qiun-data-charts/components/qiun-data-charts/qiun-data-charts.vue'
+
+import {
+    buildChartData,
+    buildChartOpts,
+    captionFontPx,
+    chartTokens,
+    paletteOf,
+    uchartsType
+} from '../utils/chartTheme'
+
+/** 空状态文案（DESIGN.md §12 / S1-C SC-11 ⑩②，**逐字冻结**） */
+const EMPTY_TEXT = '该时间段还没有记录'
+
+/** `<2 条` 提示文案（DESIGN.md §12 / S1-C SC-11 ⑩③，**逐字冻结**） */
+const INSUFFICIENT_TEXT = '至少需要 2 条记录才能画出趋势'
+
+/** 慢加载提示文案（DESIGN.md §7④，**逐字冻结**，与 SC-06 首页同口径） */
+const SLOW_TEXT = '仍在加载，请稍候'
+
+/** 切换中的淡加载文案（S1-C SC-11 ⑪） */
+const SWITCHING_TEXT = '加载中'
+
+/**
+ * 令牌桥请求标记（`':change:tokenProbe'` 的比较值）。
+ * ★ 必须与文件末 renderjs 模块内的 `TOKEN_FLAG` **逐字一致**。
+ */
+const TOKEN_PROBE_FLAG = 'need'
+
+export default {
+    name: 'TrendChartContainer',
+    components: {
+        AppSkeleton: AppSkeleton,
+        AppEmpty: AppEmpty,
+        AppErrorState: AppErrorState,
+        qiunDataCharts: qiunDataCharts
+    },
+    props: {
+        /** 当前指标（8 类之一；决定取值字段与系列色） */
+        metricType: { type: String, default: '' },
+        /**
+         * 图表区状态：
+         *   `loading`（首屏）/ `normal`（有图可画）/ `empty`（该时间段无记录）/
+         *   `insufficient`（记录数 < 2）/ `error`（请求失败）
+         * ★ 由宿主页依据**当前展示的载荷**判定，本组件不自行推断。
+         */
+        state: { type: String, default: 'loading' },
+        /** S-02 的 `data`（`points` / `window` / `chart` / `target_line` …）；无 → null */
+        chartPayload: { type: Object, default: null },
+        /** 切换中（指标或窗口切换、且**旧图仍在展示**）：淡加载指示 */
+        switching: { type: Boolean, default: false },
+        /** > 8s 仍未返回 → 在骨架 / 淡加载指示上追加「仍在加载，请稍候」（DESIGN.md §7④） */
+        slowLoading: { type: Boolean, default: false },
+        /** 失败文案（由宿主页依据统一错误口径给出） */
+        errorText: { type: String, default: '加载失败，点击重试' }
+    },
+    emits: ['retry'],
+    data: function () {
+        /*
+         * ★ 文案常量必须经 `data` 暴露给模板：
+         *   本工程使用 Options API 的 `<script>`（**非 `<script setup>`**），
+         *   模板只能访问实例上的 `data` / `computed` / `methods` / props，
+         *   模块级 `const` 不在实例上 ⇒ 直接写进模板会取到 `undefined`（文案空白）。
+         */
+        return {
+            /** 空状态文案（来自模块级冻结常量） */
+            emptyText: EMPTY_TEXT,
+            /** `<2 条` 提示文案 */
+            insufficientText: INSUFFICIENT_TEXT,
+            /** 慢加载提示文案 */
+            SLOW_TEXT: SLOW_TEXT,
+            /** 视图层回传的令牌快照（App 端兜底色源；H5 恒为 null ⇒ 不影响既有取值链） */
+            viewTokens: null,
+            /** 令牌桥请求标记：逻辑层读不到令牌时置为 TOKEN_PROBE_FLAG，触发视图层枚举 */
+            tokenProbe: ''
+        }
+    },
+    computed: {
+        /** 运行时令牌（读取失败时各项为空串 → 图表降级，但**不伪造颜色**） */
+        tokens: function () {
+            /*
+             * 传入视图层快照：① App 端它是唯一可用色源；② 同时**建立响应式依赖** ——
+             * 快照到达时必须重算本计算属性（否则会一直停在首次读到的空值上）。
+             * H5 下 `viewTokens` 恒为 null，取值链与改动前**完全一致**。
+             */
+            return chartTokens(this.viewTokens).values
+        },
+        /** 坐标轴字号（由 `--fs-caption` 按 750 设计稿基准换算；取不到 → 0 = 沿用库默认） */
+        captionPx: function () {
+            return captionFontPx(this.viewTokens)
+        },
+        /** uCharts 组件 `type`（由后端 `chart` 字段驱动：`line` / `column`） */
+        chartType: function () {
+            return uchartsType(this.chartPayload && this.chartPayload.chart)
+        },
+        /**
+         * 图表底色：取 `--c-n-0`（= `--s-card`）。
+         * 令牌未解析时返回 `undefined` ⇒ Vue 使用组件默认值，由库回退其内置白底，
+         * **我方不写任何色值**。
+         */
+        backgroundColor: function () {
+            const value = this.tokens.surface
+            return value ? value : undefined
+        },
+        /** uCharts `chartData`：类别轴按服务端窗口铺开，缺失日期为 `null` */
+        chartData: function () {
+            if (!this.chartPayload) {
+                return { categories: [], series: [] }
+            }
+            return buildChartData(this.metricType, this.chartPayload, paletteOf(this.metricType, this.tokens))
+        },
+        /** uCharts `opts`（部分覆盖，未给出项沿用库模板） */
+        chartOpts: function () {
+            return buildChartOpts(this.metricType, this.chartPayload, this.tokens, this.captionPx)
+        },
+        /** 切换中文案：慢加载时改用「仍在加载，请稍候」，与骨架态同一口径 */
+        switchingText: function () {
+            return this.slowLoading ? SLOW_TEXT : SWITCHING_TEXT
+        }
+    },
+    mounted: function () {
+        /*
+         * ★ 令牌桥触发（S3-9 3.3 第4步）：
+         *   逻辑层读不到令牌（App：无 DOM）⇒ 置 `tokenProbe` 触发视图层枚举并回传。
+         *   H5 下 `chartTokens().ok === true` ⇒ 标记恒为空串 ⇒ `:change:tokenProbe` **不触发**
+         *   ⇒ H5 不产生任何额外枚举与重绘（与改动前同源）。
+         *   ★ 此处用 `chartTokens(null)`：此刻快照必然还没到（正是要判断"需不需要它"）。
+         */
+        if (!chartTokens(null).ok) {
+            this.tokenProbe = TOKEN_PROBE_FLAG
+        }
+    },
+    methods: {
+        onRetry: function () {
+            this.$emit('retry')
+        },
+        /**
+         * 视图层令牌快照回传（renderjs `callMethod` 的唯一落点）。
+         *
+         * ★ 接受闸门：**本平台 DOM 直读已成功（H5）时一律忽略** ——
+         *   保证 H5 的令牌来源、绘制次数与改动前完全一致，不引入多余重绘。
+         *   App 端读不到（`ok === false`）才采用快照；取值优先级仍由 `readToken` 保证
+         *   「DOM 优先、快照兜底」。
+         */
+        onTokensFromView: function (value) {
+            if (!value || typeof value !== 'object') {
+                return
+            }
+            if (chartTokens(null).ok) {
+                return
+            }
+            let count = 0
+            const next = {}
+            for (const name in value) {
+                if (Object.prototype.hasOwnProperty.call(value, name) && value[name]) {
+                    next[name] = String(value[name])
+                    count += 1
+                }
+            }
+            if (!count) {
+                return
+            }
+            this.viewTokens = next
+        }
+    }
+}
+</script>
+
+<style scoped lang="scss">
+.tchart {
+    /* 宽 = var(--chart-w)（DESIGN.md §9 / §10.2：内容宽 = 视口 − 两侧 gutter）
+       ★ 本组件由页面放在「最大宽容器」内，故此处 auto 居中即与页面内容左右边缘对齐 */
+    width: var(--chart-w);
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* 状态区（加载 / 空 / <2 条 / 失败）：占满图表高，避免状态切换时页面跳动 */
+.tchart__state {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-height: var(--chart-h);
+    padding: var(--card-pad);
+    border-radius: var(--r-md);
+    background-color: var(--s-card);
+    border: 1rpx solid var(--b-line);
+    box-shadow: var(--el-0);
+}
+
+/* 慢加载提示（DESIGN.md §7④：> 8s 追加一行中性提示） */
+.tchart__slow {
+    margin-top: var(--sp-4);
+    font-size: var(--fs-caption);
+    line-height: $lh-caption;
+    color: var(--t-3);
+    text-align: center;
+    letter-spacing: 0;
+}
+
+/* 图表区：库组件内部为 width/height:100%，故此处必须给出确定高度 */
+.tchart__canvas {
+    position: relative;
+    width: 100%;
+    height: var(--chart-h);
+    border-radius: var(--r-md);
+    background-color: var(--s-card);
+    border: 1rpx solid var(--b-line);
+    box-shadow: var(--el-0);
+    overflow: hidden;
+}
+
+/* 切换中的淡加载指示（覆盖层，不遮挡指标 / 窗口切换器 —— 它们由页面持有） */
+.tchart__switching {
+    position: absolute;
+    top: var(--sp-4);
+    right: var(--sp-4);
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    padding: var(--sp-1) var(--sp-3);
+    border-radius: var(--r-full);
+    background-color: var(--s-card-sub);
+    border: 1rpx solid var(--b-line);
+}
+
+/* 加载指示：旋转圆环（DESIGN.md §7：加载指示旋转周期走 --d-breathe） */
+.tchart__spinner {
+    width: 24rpx;
+    height: 24rpx;
+    border-radius: var(--r-full);
+    border: 4rpx solid var(--c-n-200);
+    border-top-color: var(--c-p-600);
+    animation: tchart-spin var(--d-breathe) linear infinite;
+}
+
+.tchart__switching-text {
+    margin-left: var(--sp-2);
+    font-size: var(--fs-caption);
+    line-height: $lh-caption;
+    color: var(--t-3);
+    letter-spacing: 0;
+}
+
+@keyframes tchart-spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+</style>
+
+<!--
+  视图层令牌桥（renderjs）—— App 端 SC-11 配色的唯一可行通道
+
+  ★ 为什么必须是 renderjs（S3-9 3.3 第4步 实测）：
+    App（app-plus / vue3）的**逻辑层没有 DOM**，`getComputedStyle` 不存在
+    ⇒ `chartTheme.readToken()` 在真机上一律读空 ⇒ uCharts 收到空色值 ⇒ 整图偏灰。
+    而**视图层**（本脚本所在层）是带 DOM 与 `app.css` 的 WebView，能正常读到同一批 CSS 变量。
+    本模块把 `--x` 枚举出来经 `callMethod` 回传逻辑层 ⇒ **色值仍只有 `App.vue` 一处真相源**。
+
+  ★ 只读、不写：本模块只读 `getComputedStyle` 的 CSS 自定义属性，不改样式、不请求网络、
+    不产生任何像素绘制。
+
+  ★ 触发方式：逻辑层 `tokenProbe` 置为 `'need'`（H5 不置）⇒ 本模块 `onProbe` 被执行。
+-->
+<script module="chartTokenBridge" lang="renderjs">
+/*
+ * 与逻辑层 `TOKEN_PROBE_FLAG` 逐字一致（改动需两处同步）。
+ */
+const TOKEN_FLAG = 'need'
+/** 重试间隔（ms）：视图层首次挂载时 app.css 可能尚未生效，最多再试 2 次 */
+const RETRY_MS = [260, 900]
+/** 组件根类名（视图层里 classes 是真实 DOM class，可直接选中） */
+const ROOT_SELECTOR = '.tchart'
+/** CSS 自定义属性前缀 */
+const PREFIX = '--'
+
+/**
+ * 从单个元素枚举 CSS 自定义属性（`--x`）写入 `into`。
+ * @returns {number} 本次新命中的令牌个数
+ */
+function collectFrom(el, into) {
+    if (!el || typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+        return 0
+    }
+    let style = null
+    try {
+        style = window.getComputedStyle(el)
+    } catch (e) {
+        return 0
+    }
+    if (!style) {
+        return 0
+    }
+    let total = 0
+    try {
+        total = Number(style.length) || 0
+    } catch (e) {
+        total = 0
+    }
+    let hit = 0
+    for (let i = 0; i < total; i++) {
+        let name = ''
+        try {
+            name = String(style[i] || '')
+        } catch (e) {
+            name = ''
+        }
+        if (name.indexOf(PREFIX) !== 0 || into[name] !== undefined) {
+            continue
+        }
+        let value = ''
+        try {
+            value = style.getPropertyValue(name)
+        } catch (e) {
+            value = ''
+        }
+        value = value ? String(value).trim() : ''
+        if (value) {
+            into[name] = value
+            hit += 1
+        }
+    }
+    return hit
+}
+
+/**
+ * 枚举全部可用令牌。
+ * 取值顺序 = 组件自身元素 → `.tchart` → 文档级三处；CSS 变量会继承，故任一来源都同源。
+ * ★ 刻意**不只**读 `documentElement`：逻辑层那边读的就是文档级三处，两侧来源错开
+ *   才能在"逻辑层读空"的场景下真正验到桥（见 3.3 第4步报告 §对照实验）。
+ * @returns {object} 形如 `{ '--c-chart-main': '#0E9384', … }`
+ */
+function readAllTokens(instance) {
+    const out = {}
+    if (typeof document === 'undefined') {
+        return out
+    }
+    collectFrom(instance && instance.$el ? instance.$el : null, out)
+    try {
+        collectFrom(document.querySelector(ROOT_SELECTOR), out)
+    } catch (e) {
+        /* 查询失败不影响后续来源 */
+    }
+    collectFrom(document.documentElement, out)
+    collectFrom(document.body, out)
+    try {
+        collectFrom(document.querySelector('uni-page-body'), out)
+    } catch (e) {
+        /* 同上 */
+    }
+    return out
+}
+
+export default {
+    methods: {
+        /**
+         * `:change:tokenProbe` 落点：逻辑层请求令牌时枚举并回传。
+         * @param {string} value 逻辑层写入的标记（只认 TOKEN_FLAG）
+         * @param {string} oldValue 上一次的值
+         * @param {object} ownerInstance 逻辑层组件实例代理（`callMethod` 宿主）
+         * @param {object} instance 本 renderjs 实例
+         */
+        onProbe: function (value, oldValue, ownerInstance, instance) {
+            if (value !== TOKEN_FLAG) {
+                return
+            }
+            const owner = ownerInstance || this.$ownerInstance
+            const self = this
+            let round = 0
+            const run = function () {
+                const done = self.publish(owner, instance)
+                round += 1
+                if (!done && round <= RETRY_MS.length) {
+                    setTimeout(run, RETRY_MS[round - 1])
+                }
+            }
+            run()
+        },
+        /**
+         * 枚举令牌并回传逻辑层。
+         * @returns {boolean} 是否已成功送达（false 时由调用方决定是否重试）
+         */
+        publish: function (owner, instance) {
+            const values = readAllTokens(instance)
+            let count = 0
+            for (const name in values) {
+                if (values[name]) {
+                    count += 1
+                }
+            }
+            if (!count) {
+                return false
+            }
+            try {
+                if (owner && typeof owner.callMethod === 'function') {
+                    owner.callMethod('onTokensFromView', values)
+                    return true
+                }
+            } catch (e) {
+                /* 逻辑层暂不可达：交给下一步重试 */
+            }
+            return false
+        }
+    }
+}
+</script>

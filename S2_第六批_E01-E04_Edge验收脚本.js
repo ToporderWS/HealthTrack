@@ -1,0 +1,666 @@
+/* ============================================================================
+ * S2 第六批 E-01 ~ E-04（数据导出）—— 浏览器 Edge 一键验收脚本
+ * ----------------------------------------------------------------------------
+ * 用法（**同源**，无 CORS）：
+ *   1) 先启动后端：cd backend && .venv/Scripts/python.exe wsgi.py
+ *   2) 浏览器打开 http://127.0.0.1:5000/api/v1/health
+ *   3) F12 -> Console；如提示“请勿粘贴”，先手打  allow pasting  回车
+ *   4) 从下面的【开始行】下一行起整段复制，粘到 Console 回车
+ *
+ * 【开始行】= 本行
+ * ============================================================================
+ *
+ * 设计约束（本机硬约束，务必遵守）：
+ *   - **零反引号**：不使用 ES6 模板字符串，全部改为字符串拼接
+ *     （“查看 -> 复制”链路会吞掉反引号，导致 missing ) after argument list）。
+ *   - **GET/HEAD 不携带 body**：fetch 对 GET 带 body 会直接抛 TypeError；
+ *     需要投递 JSON 体时一律换成 POST 投同一路径。
+ *   - 断言只描述“API 可证事实”；点名错误码时**同时**校验 code；
+ *     判 null 用 === null，不用 !x。
+ *   - 分组用 async 函数 + try/catch：**块内抛异常 = 该块剩余断言不执行、只压入 1 条 FAIL**
+ *     （因此报告里的“断言总数”必须在无异常时读取）。
+ *   - 本脚本无法删除 export_job（无对应接口）：导出任务请用素材 B 第 3 段 SQL 收尾清理。
+ */
+(function () {
+  'use strict';
+
+  var BASE = location.origin + '/api/v1';
+  var PWD = 'Kangji2026';
+  var UA = 'tstb6edgea';   /* 本端 */
+  var UB = 'tstb6edgeb';   /* 对端 */
+
+  var CREATE_KEYS = ['created_at', 'download_expires_at', 'export_id', 'format',
+                     'purge_at', 'record_count', 'status'];
+  var DETAIL_KEYS = ['created_at', 'download_expires_at', 'downloaded_at', 'export_id',
+                     'file_size_bytes', 'file_token', 'format', 'purge_at',
+                     'record_count', 'status'];
+  var ITEM_KEYS = ['created_at', 'download_expires_at', 'downloaded_at', 'export_id',
+                   'file_size_bytes', 'format', 'purge_at', 'record_count', 'status'];
+  var CSV_HEADER = 'metric_type,value_1,value_2,value_3,unit,attr_1,attr_2,recorded_at,' +
+                   'time_start,note,tags,created_at';
+
+  var results = [];
+  var fails = [];
+  var recIdsA = [];
+  var jobIdsA = [];
+  var tokenA = '';
+  var tokenB = '';
+
+  function say(text) {
+    console.log(text);
+  }
+
+  function ok(name, cond, detail) {
+    var pass = cond === true;
+    results.push({ name: name, pass: pass, detail: detail || '' });
+    if (!pass) {
+      fails.push(name + (detail ? '   -> ' + detail : ''));
+    }
+    say('  ' + (pass ? 'PASS' : 'FAIL') + '  ' + name + (pass ? '' : '   -> ' + detail));
+    return pass;
+  }
+
+  function okEq(name, actual, expect) {
+    var a = JSON.stringify(actual);
+    var e = JSON.stringify(expect);
+    return ok(name, a === e, '实际 ' + a + ' / 期望 ' + e);
+  }
+
+  function sortedKeys(obj) {
+    return Object.keys(obj || {}).sort();
+  }
+
+  function pad2(n) {
+    return (n < 10 ? '0' : '') + n;
+  }
+
+  /* 本地墙上时间（与 D-4 口径一致） */
+  function stamp(dayOffset, hour, minute) {
+    var d = new Date();
+    d.setDate(d.getDate() + dayOffset);
+    d.setHours(hour, minute, 0, 0);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' +
+           pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':00';
+  }
+
+  function dayStr(dayOffset) {
+    var d = new Date();
+    d.setDate(d.getDate() + dayOffset);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+
+  function dtSecs(text) {
+    if (!text) {
+      return null;
+    }
+    var m = String(text).match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (!m) {
+      return null;
+    }
+    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000;
+  }
+
+  /* ── HTTP：JSON 调用（GET/HEAD 一律不带 body） ─────────────────────────── */
+  function call(method, path, body, token, extraHeaders) {
+    var opt = { method: method, headers: {} };
+    var k;
+    if (extraHeaders) {
+      for (k in extraHeaders) {
+        if (Object.prototype.hasOwnProperty.call(extraHeaders, k)) {
+          opt.headers[k] = extraHeaders[k];
+        }
+      }
+    }
+    if (token) {
+      opt.headers.Authorization = 'Bearer ' + token;
+    }
+    if (body !== undefined && body !== null && method !== 'GET' && method !== 'HEAD') {
+      opt.headers['Content-Type'] = 'application/json';
+      opt.body = JSON.stringify(body);
+    }
+    return fetch(BASE + path, opt).then(function (resp) {
+      return resp.text().then(function (text) {
+        var parsed = null;
+        try {
+          parsed = text ? JSON.parse(text) : null;
+        } catch (e) {
+          parsed = null;
+        }
+        return { status: resp.status, body: parsed, text: text };
+      });
+    });
+  }
+
+  /* ── HTTP：取原始响应（含响应头）；用于 E-03 文件流 ───────────────────── */
+  function rawGet(path, token) {
+    var opt = { method: 'GET', headers: {} };
+    if (token) {
+      opt.headers.Authorization = 'Bearer ' + token;
+    }
+    return fetch(BASE + path, opt).then(function (resp) {
+      var lower = {};
+      resp.headers.forEach(function (value, key) {
+        lower[String(key).toLowerCase()] = value;
+      });
+      return resp.text().then(function (text) {
+        return { status: resp.status, headers: lower, text: text };
+      });
+    });
+  }
+
+  function dataOf(body) {
+    return (body && body.data) || {};
+  }
+
+  function codeOf(body) {
+    return (body && body.code) || '';
+  }
+
+  var DISPOSITION_RE = /^attachment; filename="healthtrack_export_\d{8}\.(csv|json)"$/;
+
+  /* ══════════════════════════════════════════════════════════════════════ */
+  async function group0Connect() {
+    var h = await call('GET', '/health');
+    ok('连通性：GET /api/v1/health 200 OK', h.status === 200 && codeOf(h.body) === 'OK',
+       'HTTP ' + h.status + ' ' + codeOf(h.body));
+
+    var unauth = [['POST', '/exports'], ['GET', '/exports'],
+                  ['GET', '/exports/1'], ['GET', '/exports/1/download?file_token=x']];
+    for (var i = 0; i < unauth.length; i++) {
+      var r = await call(unauth[i][0], unauth[i][1]);
+      ok('无 Token：' + unauth[i][0] + ' ' + unauth[i][1] + ' -> 401',
+         r.status === 401, 'HTTP ' + r.status);
+    }
+
+    var q = await call('GET', '/exports?user_id=1', null, tokenA);
+    ok('E-04 query 携带 user_id -> 400 INVALID_PARAM',
+       q.status === 400 && codeOf(q.body) === 'INVALID_PARAM',
+       'HTTP ' + q.status + ' ' + codeOf(q.body));
+
+    var b = await call('POST', '/exports',
+                       { format: 'csv', password: PWD, user_id: 1 }, tokenA);
+    ok('E-01 body 携带 user_id -> 400 INVALID_PARAM',
+       b.status === 400 && codeOf(b.body) === 'INVALID_PARAM',
+       'HTTP ' + b.status + ' ' + codeOf(b.body));
+
+    /* 用 GET 校验 envelope：**不能**用 POST —— 会在本端真的创建一个 export_job，
+       后续 E-01 将立刻因「进行中冲突」返回 409，造成断言连锁失败。 */
+    var e = await call('GET', '/exports', null, tokenA);
+    okEq('统一 envelope：成功响应恰 4 键（code/message/data/request_id）',
+         sortedKeys(e.body), ['code', 'data', 'message', 'request_id']);
+  }
+
+  async function group1Peer() {
+    var r1 = await call('POST', '/exports',
+                        { format: 'csv', metric_types: null, password: PWD }, tokenB);
+    var emptyId = dataOf(r1.body).export_id;
+    ok('E-01 对端空数据导出 202', r1.status === 202, 'HTTP ' + r1.status + ' ' + codeOf(r1.body));
+    ok('E-01 对端空数据 record_count === 0', dataOf(r1.body).record_count === 0,
+       String(dataOf(r1.body).record_count));
+
+    var d = await call('GET', '/exports/' + emptyId, null, tokenB);
+    var tk = dataOf(d.body).file_token;
+    var dl = await rawGet('/exports/' + emptyId + '/download?file_token=' + tk, tokenB);
+    /* 2026-09-14 修正（最小改动，仅切分方式）：
+       空数据 CSV 冻结形态 = 「单行表头 + CRLF」。用 split('\n') 会把行尾 CR 留在
+       lines[0]（'...created_at\r'），与不含 CR 的 CSV_HEADER 比较必然不等 -> 假 FAIL。
+       改用 split('\r\n') 后该断言**更强**：CRLF 时 len=2 通过；若后端退化为 LF-only，
+       len=1 -> FAIL；若多出空行，len=3 -> FAIL。 */
+    var lines = dl.text.split('\r\n');
+    ok('E-03 对端空数据下载 200 且仅表头 + CRLF',
+       dl.status === 200 && lines.length === 2 && lines[0] === CSV_HEADER && lines[1] === '',
+       'HTTP ' + dl.status + ' lines=' + lines.length + ' 首行=' + JSON.stringify(lines[0]));
+
+    var w1 = await call('POST', '/exports', { format: 'csv', password: 'WrongPass1' }, tokenB);
+    ok('E-01 口令错误第 1 次 -> 422 PASSWORD_INVALID',
+       w1.status === 422 && codeOf(w1.body) === 'PASSWORD_INVALID',
+       'HTTP ' + w1.status + ' ' + codeOf(w1.body));
+    var w2 = await call('POST', '/exports', { format: 'csv', password: 'WrongPass2' }, tokenB);
+    ok('E-01 口令错误第 2 次 -> 422 PASSWORD_INVALID',
+       w2.status === 422 && codeOf(w2.body) === 'PASSWORD_INVALID',
+       'HTTP ' + w2.status + ' ' + codeOf(w2.body));
+    var w3 = await call('POST', '/exports', { format: 'csv', password: 'WrongPass3' }, tokenB);
+    ok('E-01 口令连错第 3 次 -> 429 SESSION_VERIFY_ABORTED',
+       w3.status === 429 && codeOf(w3.body) === 'SESSION_VERIFY_ABORTED',
+       'HTTP ' + w3.status + ' ' + codeOf(w3.body));
+    var w4 = await call('POST', '/exports',
+                        { format: 'csv', metric_types: ['water'], password: 'WrongPass4' }, tokenB);
+    ok('E-01 指定 metric_types 不豁免二次验密（仍 429）',
+       w4.status === 429 && codeOf(w4.body) === 'SESSION_VERIFY_ABORTED',
+       'HTTP ' + w4.status + ' ' + codeOf(w4.body));
+    var w5 = await call('POST', '/exports', { format: 'csv', password: PWD }, tokenB);
+    ok('E-01 口令正确 -> 202（会话计数清零）', w5.status === 202,
+       'HTTP ' + w5.status + ' ' + codeOf(w5.body));
+  }
+
+  async function group2Seed() {
+    var payloads = [
+      { metric_type: 'weight', value_1: 70.50, recorded_at: stamp(-2, 9, 0) },
+      { metric_type: 'water', value_1: 500, recorded_at: stamp(-1, 9, 0) },
+      { metric_type: 'mood', value_1: 4, tags: ['relaxed', 'focused'], recorded_at: stamp(-1, 10, 0) }
+    ];
+    for (var i = 0; i < payloads.length; i++) {
+      var r = await call('POST', '/records', payloads[i], tokenA);
+      if (r.status !== 201) {
+        throw new Error('R-01 写入失败 HTTP ' + r.status + ' ' + codeOf(r.body));
+      }
+      recIdsA.push(dataOf(r.body).record.id);
+    }
+    ok('造数：本端 3 条记录（weight/water/mood+tags）', recIdsA.length === 3,
+       String(recIdsA.length));
+
+    var v = await call('POST', '/records',
+                       { metric_type: 'water', value_1: 700, recorded_at: stamp(-3, 9, 0) }, tokenA);
+    var victim = dataOf(v.body).record.id;
+    var del = await call('DELETE', '/records/' + victim, null, tokenA);
+    ok('造数：软删 1 条 water（HTTP 200，物理行保留）', del.status === 200, 'HTTP ' + del.status);
+    ok('造数：软删记录不入 recIdsA（导出时按 API 事实比对）', recIdsA.indexOf(victim) < 0);
+  }
+
+  async function group3E01() {
+    var r = await call('POST', '/exports',
+                       { format: 'csv', metric_types: null, password: PWD }, tokenA);
+    var d = dataOf(r.body);
+    jobIdsA.push(d.export_id);
+    ok('E-01 成功状态码 202（冻结）', r.status === 202, 'HTTP ' + r.status);
+    okEq('E-01 data 恰 7 键', sortedKeys(d), CREATE_KEYS);
+    ok('E-01 同步生成：status === ready', d.status === 'ready', String(d.status));
+    ok('E-01 record_count === 3（软删数据不计入）', d.record_count === 3, String(d.record_count));
+    var c = dtSecs(d.created_at);
+    var x = dtSecs(d.download_expires_at);
+    var p = dtSecs(d.purge_at);
+    ok('E-01 TTL：下载窗口 600s / purge 3600s（冻结）',
+       c !== null && x !== null && p !== null && (x - c) === 600 && (p - c) === 3600,
+       d.created_at + ' / ' + d.download_expires_at + ' / ' + d.purge_at);
+    ok('E-01 响应无 file_path / file_token',
+       !('file_path' in d) && !('file_token' in d), sortedKeys(d).join(','));
+  }
+
+  async function group4E02() {
+    var id = jobIdsA[0];
+    var r = await call('GET', '/exports/' + id, null, tokenA);
+    var d = dataOf(r.body);
+    ok('E-02 200 且 data 恰 10 键', r.status === 200 && sortedKeys(d).join(',') === DETAIL_KEYS.join(','),
+       'HTTP ' + r.status + ' ' + sortedKeys(d).join(','));
+    ok('E-02 file_token 为 32 位十六进制', /^[0-9a-f]{32}$/.test(String(d.file_token)),
+       String(d.file_token).length + ' 位');
+    ok('E-02 无 file_path', !('file_path' in d));
+    ok('E-02 file_size_bytes > 0', d.file_size_bytes > 0, String(d.file_size_bytes));
+    ok('E-02 downloaded_at 初始 === null', d.downloaded_at === null, String(d.downloaded_at));
+  }
+
+  async function group5E03() {
+    var id = jobIdsA[0];
+    var det = await call('GET', '/exports/' + id, null, tokenA);
+    var tk = dataOf(det.body).file_token;
+    var dl = await rawGet('/exports/' + id + '/download?file_token=' + tk, tokenA);
+    ok('E-03 成功 200（文件流，非 JSON 包装）', dl.status === 200, 'HTTP ' + dl.status);
+    okEq('E-03 Content-Type = text/csv; charset=utf-8',
+         dl.headers['content-type'], 'text/csv; charset=utf-8');
+    ok('E-03 Content-Disposition 为冻结形态（服务端生成文件名）',
+       DISPOSITION_RE.test(String(dl.headers['content-disposition'])),
+       String(dl.headers['content-disposition']));
+    ok('E-03 响应头带 X-Request-Id', !!dl.headers['x-request-id'],
+       String(dl.headers['x-request-id']));
+    var lines = dl.text.split('\r\n');
+    okEq('E-03 CSV 表头 = 冻结 12 列（无 id / user_id）', lines[0], CSV_HEADER);
+    ok('E-03 CSV 恰 3 行数据且软删值 700 不出现',
+       lines.length === 5 && lines[4] === '' && dl.text.indexOf('700') < 0,
+       'lines=' + lines.length);
+    ok('E-03 CSV mood 标签以竖线连接', dl.text.indexOf('relaxed|focused') >= 0);
+    ok('E-03 数值归一：70.50 -> 70.5（无多余 0）',
+       dl.text.indexOf(',70.5,') >= 0 && dl.text.indexOf('70.50') < 0);
+    ok('E-03 导出内容不含 user_id 字样', dl.text.indexOf('user_id') < 0);
+
+    var after = await call('GET', '/exports/' + id, null, tokenA);
+    var da = dataOf(after.body);
+    ok('E-03 首次下载写 downloaded_at 且 status === downloaded',
+       da.downloaded_at !== null && da.status === 'downloaded',
+       String(da.downloaded_at) + ' / ' + String(da.status));
+
+    var again = await rawGet('/exports/' + id + '/download?file_token=' + tk, tokenA);
+    var after2 = await call('GET', '/exports/' + id, null, tokenA);
+    ok('E-03 窗口内重复下载 200 且不覆盖首次 downloaded_at',
+       again.status === 200 && again.text === dl.text &&
+       dataOf(after2.body).downloaded_at === da.downloaded_at,
+       String(dataOf(after2.body).downloaded_at) + ' vs ' + String(da.downloaded_at));
+    ok('E-03 重复下载后 status 仍为 downloaded',
+       dataOf(after2.body).status === 'downloaded', String(dataOf(after2.body).status));
+  }
+
+  async function group6E03Negative() {
+    var id = jobIdsA[0];
+    var det = await call('GET', '/exports/' + id, null, tokenA);
+    var tk = dataOf(det.body).file_token;
+
+    var bad = await call('GET', '/exports/' + id + '/download?file_token=' +
+                         '00000000000000000000000000000000', null, tokenA);
+    ok('E-03 token 不匹配 -> 404 RESOURCE_NOT_FOUND',
+       bad.status === 404 && codeOf(bad.body) === 'RESOURCE_NOT_FOUND',
+       'HTTP ' + bad.status + ' ' + codeOf(bad.body));
+
+    var miss = await call('GET', '/exports/' + id + '/download', null, tokenA);
+    ok('E-03 缺 file_token -> 404 RESOURCE_NOT_FOUND',
+       miss.status === 404 && codeOf(miss.body) === 'RESOURCE_NOT_FOUND',
+       'HTTP ' + miss.status + ' ' + codeOf(miss.body));
+
+    var cross1 = await call('GET', '/exports/' + id, null, tokenB);
+    ok('E-02 越权（对端查本端任务）-> 404 RESOURCE_NOT_FOUND',
+       cross1.status === 404 && codeOf(cross1.body) === 'RESOURCE_NOT_FOUND',
+       'HTTP ' + cross1.status + ' ' + codeOf(cross1.body));
+
+    var cross2 = await call('GET', '/exports/' + id + '/download?file_token=' + tk,
+                            null, tokenB);
+    ok('E-03 越权（对端持本端 token）-> 404 RESOURCE_NOT_FOUND',
+       cross2.status === 404 && codeOf(cross2.body) === 'RESOURCE_NOT_FOUND',
+       'HTTP ' + cross2.status + ' ' + codeOf(cross2.body));
+
+    var none = await call('GET', '/exports/99999999', null, tokenA);
+    ok('E-02 不存在的任务 -> 404 RESOURCE_NOT_FOUND',
+       none.status === 404 && codeOf(none.body) === 'RESOURCE_NOT_FOUND',
+       'HTTP ' + none.status + ' ' + codeOf(none.body));
+
+    var after = await call('GET', '/exports/' + id, null, tokenA);
+    ok('E-03 全部失败尝试后 downloaded_at 未被改写（仍为原值）',
+       dataOf(after.body).downloaded_at !== null);
+  }
+
+  async function group7Conflict() {
+    var r2 = await call('POST', '/exports', { format: 'csv', password: PWD }, tokenA);
+    var job2 = dataOf(r2.body).export_id;
+    jobIdsA.push(job2);
+    ok('E-03 已下载任务不再阻塞新导出 -> 202', r2.status === 202,
+       'HTTP ' + r2.status + ' ' + codeOf(r2.body));
+
+    var conflict = await call('POST', '/exports', { format: 'csv', password: PWD }, tokenA);
+    ok('E-01 已有 ready 任务 -> 409 EXPORT_IN_PROGRESS',
+       conflict.status === 409 && codeOf(conflict.body) === 'EXPORT_IN_PROGRESS',
+       'HTTP ' + conflict.status + ' ' + codeOf(conflict.body));
+
+    var d2 = await call('GET', '/exports/' + job2, null, tokenA);
+    var tk2 = dataOf(d2.body).file_token;
+    var dl2 = await rawGet('/exports/' + job2 + '/download?file_token=' + tk2, tokenA);
+    ok('E-01 冲突解除：下载后任务转为 downloaded', dl2.status === 200, 'HTTP ' + dl2.status);
+
+    var after = await call('POST', '/exports', { format: 'csv', password: PWD }, tokenA);
+    ok('E-01 解除后可再次创建 -> 202', after.status === 202, 'HTTP ' + after.status);
+    var job3 = dataOf(after.body).export_id;
+    if (job3) {
+      var d3 = await call('GET', '/exports/' + job3, null, tokenA);
+      await rawGet('/exports/' + job3 + '/download?file_token=' +
+                   dataOf(d3.body).file_token, tokenA);
+    }
+  }
+
+  async function group8Json() {
+    var r = await call('POST', '/exports',
+                       { format: 'json', metric_types: ['weight', 'water'], password: PWD }, tokenA);
+    var d = dataOf(r.body);
+    ok('E-01 json 格式 202 且 record_count === 2',
+       r.status === 202 && d.record_count === 2,
+       'HTTP ' + r.status + ' count=' + String(d.record_count));
+    var id = d.export_id;
+    var det = await call('GET', '/exports/' + id, null, tokenA);
+    var tk = dataOf(det.body).file_token;
+    var dl = await rawGet('/exports/' + id + '/download?file_token=' + tk, tokenA);
+    okEq('E-03 json Content-Type = application/json; charset=utf-8',
+         dl.headers['content-type'], 'application/json; charset=utf-8');
+    var parsed = null;
+    try {
+      parsed = JSON.parse(dl.text);
+    } catch (e) {
+      parsed = null;
+    }
+    ok('E-03 json 顶层仅 records 键且 2 条',
+       parsed !== null && Object.keys(parsed).join(',') === 'records' &&
+       parsed.records.length === 2,
+       parsed ? Object.keys(parsed).join(',') + ' / n=' + parsed.records.length : 'parse-error');
+    ok('E-03 json 行不含 id / user_id',
+       parsed !== null && parsed.records.length === 2 &&
+       !('id' in parsed.records[0]) && !('user_id' in parsed.records[0]),
+       parsed ? sortedKeys(parsed.records[0]).join(',') : 'parse-error');
+    ok('E-03 json 行恰 12 列（与 CSV 列集合一致）',
+       parsed !== null && sortedKeys(parsed.records[0]).length === 12,
+       parsed ? String(sortedKeys(parsed.records[0]).length) : 'parse-error');
+  }
+
+  async function group9E04() {
+    var r = await call('GET', '/exports', null, tokenA);
+    var d = dataOf(r.body);
+    ok('E-04 200 且 data 恰 3 键（items/next_cursor/has_more）',
+       r.status === 200 && sortedKeys(d).join(',') === 'has_more,items,next_cursor',
+       'HTTP ' + r.status + ' ' + sortedKeys(d).join(','));
+    var items = d.items || [];
+    ok('E-04 items 每项恰 9 键（无 file_token）',
+       items.length > 0 && items.every(function (it) {
+         return sortedKeys(it).join(',') === ITEM_KEYS.join(',');
+       }), items.length + ' 项');
+    ok('E-04 不返回 total / 不返回 file_path',
+       !('total' in d) && items.every(function (it) { return !('file_path' in it); }));
+    ok('E-04 排序 created_at DESC（不支持自定义）', items.every(function (it, i) {
+      return i === 0 || items[i - 1].created_at >= it.created_at;
+    }), items.map(function (it) { return it.created_at; }).join(' > '));
+    /* 此时本端恰有 4 个任务：全量 csv、解除冲突后重建、json 全量、以及首个任务；
+       本块之前**没有**任何 POST 会额外建任务（envelope 校验已改用 GET 校验）。 */
+    ok('E-04 本端 4 条 / has_more === false',
+       items.length === 4 && d.has_more === false,
+       items.length + ' / ' + String(d.has_more));
+
+    var l100 = await call('GET', '/exports?limit=100', null, tokenA);
+    ok('E-04 limit=100（上限）合法 200', l100.status === 200, 'HTTP ' + l100.status);
+    var l50 = await call('GET', '/exports?limit=50', null, tokenA);
+    ok('E-04 limit=50（白名单）合法 200', l50.status === 200, 'HTTP ' + l50.status);
+    var badLimits = ['7', '0', '-1', '101', '1000', 'abc'];
+    var bad = [];
+    for (var i = 0; i < badLimits.length; i++) {
+      var rr = await call('GET', '/exports?limit=' + badLimits[i], null, tokenA);
+      if (rr.status !== 400) {
+        bad.push(badLimits[i] + ':' + rr.status);
+      }
+    }
+    ok('E-04 非法 limit 一律 400', bad.length === 0, bad.join(','));
+    var bc = await call('GET', '/exports?cursor=not-a-cursor', null, tokenA);
+    ok('E-04 非法 cursor -> 400（不回退）', bc.status === 400, 'HTTP ' + bc.status);
+    var db = await call('GET', '/exports', null, tokenB);
+    var bItems = dataOf(db.body).items || [];
+    ok('E-04 隔离：对端列表不含本端任务',
+       bItems.every(function (it) { return jobIdsA.indexOf(it.export_id) < 0; }),
+       bItems.map(function (it) { return it.export_id; }).join(','));
+    ok('E-04 隔离：对端 items 每项仍为 9 键且无 file_token',
+       bItems.length > 0 && bItems.every(function (it) {
+         return sortedKeys(it).join(',') === ITEM_KEYS.join(',');
+       }), bItems.length + ' 项');
+  }
+
+  async function group10Range() {
+    var r = await call('POST', '/exports',
+                       { format: 'csv', range_start: dayStr(-2), range_end: dayStr(-1),
+                         password: PWD }, tokenA);
+    var d = dataOf(r.body);
+    ok('E-01 半开区间 [d-2, d-1) 仅含 d-2 -> record_count === 1',
+       r.status === 202 && d.record_count === 1,
+       'HTTP ' + r.status + ' count=' + String(d.record_count));
+    if (d.export_id) {
+      var det = await call('GET', '/exports/' + d.export_id, null, tokenA);
+      var dl = await rawGet('/exports/' + d.export_id + '/download?file_token=' +
+                            dataOf(det.body).file_token, tokenA);
+      ok('E-03 区间导出文件恰 1 行数据且不含 d-1 的 500',
+         dl.status === 200 && dl.text.split('\r\n').length === 3 &&
+         dl.text.indexOf('500') < 0, 'lines=' + dl.text.split('\r\n').length);
+      jobIdsA.push(d.export_id);
+    }
+  }
+
+  async function group11Idempotency() {
+    var key = 'b6edge-' + String(Date.now());
+    var h = { 'Idempotency-Key': key };
+    var r1 = await call('POST', '/exports', { format: 'csv', password: PWD }, tokenA, h);
+    var id1 = dataOf(r1.body).export_id;
+    ok('E-01 首投（带 Idempotency-Key）202', r1.status === 202, 'HTTP ' + r1.status);
+    if (id1) {
+      jobIdsA.push(id1);
+      var det = await call('GET', '/exports/' + id1, null, tokenA);
+      await rawGet('/exports/' + id1 + '/download?file_token=' +
+                   dataOf(det.body).file_token, tokenA);
+      var r2 = await call('POST', '/exports', { format: 'csv', password: PWD }, tokenA, h);
+      ok('E-01 同 Idempotency-Key 回放：202 且 export_id 一致',
+         r2.status === 202 && dataOf(r2.body).export_id === id1,
+         String(dataOf(r2.body).export_id) + ' vs ' + String(id1));
+      ok('E-01 回放不产生新任务（回放体与首投体逐字段一致）',
+         JSON.stringify(dataOf(r1.body)) === JSON.stringify(dataOf(r2.body)));
+    }
+  }
+
+  async function group12Params() {
+    var cases = [
+      [{ password: PWD }, '缺 format'],
+      [{ format: 'xml', password: PWD }, 'format 非法'],
+      [{ format: 'csv', password: PWD, metric_types: 'water' }, 'metric_types 非数组'],
+      [{ format: 'csv', password: PWD, metric_types: [] }, 'metric_types 空数组'],
+      [{ format: 'csv', password: PWD, metric_types: ['unknown'] }, 'metric_types 非法值'],
+      /* 2026-9-1（非零填充）不会被拒：Python strptime("%Y-%m-%d") 接受该写法，
+         且 E-01 冻结契约未要求严格零填充 -> 改用契约内可判定的非法格式（斜杠）。 */
+      [{ format: 'csv', password: PWD, range_start: '2026/03/01' }, 'range_start 非法格式'],
+      [{ format: 'csv', password: PWD, range_start: dayStr(-1), range_end: dayStr(-2) },
+       'range_start >= range_end'],
+      [{ format: 'csv' }, '缺 password']
+    ];
+    var bad = [];
+    for (var i = 0; i < cases.length; i++) {
+      var rr = await call('POST', '/exports', cases[i][0], tokenA);
+      if (rr.status !== 400) {
+        bad.push(cases[i][1] + ':' + rr.status);
+      }
+    }
+    ok('E-01 参数校验 8 例一律 400', bad.length === 0, bad.join(','));
+
+    var nf = await call('GET', '/exports?limit=20&metric_type=weight', null, tokenA);
+    ok('E-04 多余 query 参数被忽略（limit=20 正常 200）', nf.status === 200, 'HTTP ' + nf.status);
+
+    var shape = await call('POST', '/exports', { format: 'csv', password: PWD }, tokenA);
+    ok('E-01 进行中冲突不影响参数校验顺序（409 或 202 均为契约内）',
+       shape.status === 409 || shape.status === 202, 'HTTP ' + shape.status);
+  }
+
+  async function group13Leak() {
+    var r = await call('GET', '/exports', null, tokenA);
+    var text = JSON.stringify(r.body || {});
+    ok('E-04 载荷不含 file_path / password_hash / access_token / refresh_token',
+       text.indexOf('file_path') < 0 && text.indexOf('password_hash') < 0 &&
+       text.indexOf('access_token') < 0 && text.indexOf('refresh_token') < 0);
+    var d = await call('GET', '/exports/' + jobIdsA[0], null, tokenA);
+    var t2 = JSON.stringify(d.body || {});
+    ok('E-02 载荷不含 file_path / 密钥类字段',
+       t2.indexOf('file_path') < 0 && t2.indexOf('password') < 0 &&
+       t2.indexOf('secret') < 0);
+    ok('E-02/E-04 均无 total 字段（冻结：不返回总数）',
+       !('total' in dataOf(r.body)) && !('total' in dataOf(d.body)));
+  }
+
+  async function cleanup() {
+    var n = 0;
+    for (var i = 0; i < recIdsA.length; i++) {
+      await call('DELETE', '/records/' + recIdsA[i], null, tokenA);
+      n++;
+    }
+    var goals = await call('GET', '/goals?include_paused=true', null, tokenA);
+    var items = dataOf(goals.body).items || [];
+    for (var j = 0; j < items.length; j++) {
+      await call('DELETE', '/goals/' + items[j].id, null, tokenA);
+      n++;
+    }
+    say('  收尾：本端业务数据已清理 ' + n + ' 项（export_job 与测试账号请用素材 B 第 3 段 SQL 清理）');
+  }
+
+  async function run() {
+    say('=====================================================================');
+    say('S2 第六批 E-01~E-04（数据导出）· Edge 一键验收');
+    say('目标后端：' + BASE + '    账号：' + UA + ' / ' + UB);
+    say('=====================================================================');
+
+    try {
+      await group0Connect();
+      if (fails.indexOf('连通性：GET /api/v1/health 200 OK') >= 0 ||
+          results[0].pass !== true) {
+        say('  [STOP] 连通性失败，后端未就绪：cd backend && .venv/Scripts/python.exe wsgi.py');
+        report();
+        return;
+      }
+
+      await call('POST', '/auth/register', { username: UA, password: PWD,
+                                             agreement_version: 'v1.0',
+                                             agreement_accepted: true });
+      var la = await call('POST', '/auth/login', { username: UA, password: PWD });
+      tokenA = (dataOf(la.body).tokens || {}).access_token || '';
+
+      await call('POST', '/auth/register', { username: UB, password: PWD,
+                                             agreement_version: 'v1.0',
+                                             agreement_accepted: true });
+      var lb = await call('POST', '/auth/login', { username: UB, password: PWD });
+      tokenB = (dataOf(lb.body).tokens || {}).access_token || '';
+      ok('双账号就绪（tstb6edgea 本端 / tstb6edgeb 对端）', !!tokenA && !!tokenB);
+      if (!tokenA || !tokenB) {
+        say('  [STOP] 账号登录失败，无法继续。');
+        report();
+        return;
+      }
+
+      var groups = [
+        ['1. 对端：空数据导出 + 二次验密闸门', group1Peer],
+        ['2. 本端造数', group2Seed],
+        ['3. E-01 创建导出（csv / 全部指标）', group3E01],
+        ['4. E-02 查询', group4E02],
+        ['5. E-03 下载（正向）', group5E03],
+        ['6. E-03 下载（反向：token / 越权 / 不存在）', group6E03Negative],
+        ['7. 409 进行中冲突与解除', group7Conflict],
+        ['8. json 格式导出', group8Json],
+        ['9. E-04 列表与分页', group9E04],
+        ['10. 半开区间 [d-2, d-1)', group10Range],
+        ['11. 幂等（Idempotency-Key）', group11Idempotency],
+        ['12. 参数校验', group12Params],
+        ['13. 字段泄漏扫描', group13Leak]
+      ];
+      for (var i = 0; i < groups.length; i++) {
+        say('');
+        say('── ' + groups[i][0] + ' ' + '─'.repeat(6));
+        try {
+          await groups[i][1]();
+        } catch (err) {
+          ok('【' + groups[i][0] + '】块内异常', false, String(err));
+        }
+      }
+    } catch (err) {
+      ok('顶层执行异常', false, String(err));
+    } finally {
+      try {
+        await cleanup();
+      } catch (err2) {
+        say('  [WARN] 收尾异常：' + String(err2));
+      }
+      report();
+    }
+  }
+
+  function report() {
+    var passed = 0;
+    for (var i = 0; i < results.length; i++) {
+      if (results[i].pass) {
+        passed++;
+      }
+    }
+    say('');
+    say('=====================================================================');
+    say('  合计 ' + passed + '/' + results.length + ' 通过，' + (results.length - passed) + ' 项失败');
+    say('  结论：' + (passed === results.length ? '全部通过' : '存在失败项'));
+    if (results.length - passed > 0) {
+      say('  失败项：');
+      for (var j = 0; j < fails.length; j++) {
+        say('    - ' + fails[j]);
+      }
+    }
+    say('  提醒：脚本无法删除 export_job；请执行素材 B 第 3 段 SQL 清理 tstb6edgea / tstb6edgeb。');
+    say('=====================================================================');
+  }
+
+  run();
+})();

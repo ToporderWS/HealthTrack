@@ -1,0 +1,30 @@
+# 《康迹 HealthTrack》后端依赖清单
+# 依据：《S1-D-技术方案最终冻结》技术栈 —— Flask 3.x / SQLAlchemy 2.x / Marshmallow / Alembic / MySQL 8.0
+# 运行环境：Python 3.11+（不得使用 Python 3.7.x）
+#
+# 说明：
+#   - 本清单为 S2 第一批「工程骨架」依赖，含骨架启动与后续批次所需的核心库；
+#   - 定时/异步任务采用 Flask CLI + 系统计划任务，**不引入 Celery / MQ / Redis**（S1-D 冻结）。
+
+# ── Web 框架 ──────────────────────────────────────────
+Flask==3.0.3
+Werkzeug==3.0.6
+
+# ── ORM / 数据库（纯 SQLAlchemy 2.x，不额外引入 ORM 集成层）──
+SQLAlchemy==2.0.36
+alembic==1.14.0
+PyMySQL==1.1.1
+cryptography==43.0.3
+
+# ── 序列化 / 参数校验 ─────────────────────────────────
+marshmallow==3.23.1
+
+# ── 配置加载（.env 读取）─────────────────────────────
+python-dotenv==1.0.1
+
+# ── 认证（Access JWT 2h / Refresh 30d / bcrypt cost=12）──
+PyJWT==2.10.1
+bcrypt==4.2.0
+
+# ── 测试 ──────────────────────────────────────────────
+pytest==8.3.3

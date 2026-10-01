@@ -1,0 +1,128 @@
+================================================================================
+康迹 HealthTrack · S2 第四批《健康目标 G-01~G-07》人工验收
+【文件 3 / 3】MySQL 里要粘贴的 SQL
+--------------------------------------------------------------------------------
+执行位置：先按【文件 1 / 3】第 3 步登录 MySQL，提示符变成  mysql>  后，
+          把下面的 SQL 按顺序一段一段粘贴执行。
+说明：
+  · 第 A 段是【只读 SELECT】，只查不改，用来确认 G-06 的软删三件事。
+  · 第 B 段是【清理 DELETE】，会把本次验收产生的 acctest01 / acctest02 数据删掉。
+  · 第 C 段是【只读 SELECT】，确认 8 张业务表回到 0 行。
+  · 每段都以分号 ; 结尾，一条一条粘贴（也可以整段粘贴，MySQL 会按分号逐条执行）。
+  · 本文件不会自动执行，只是给你复制的纯文本。
+================================================================================
+
+
+
+================================================================================
+【第 A 段】G-06 数据库直查（只读 SELECT，不改任何数据）
+--------------------------------------------------------------------------------
+背景：is_deleted / deleted_at / deleted_marker 这三个字段接口刻意不对外暴露
+      （这是正确设计），所以「deleted_at 非空」必须直接查库确认。
+================================================================================
+
+
+-- A-1 主查询：列出 acctest01 的全部目标，并把「deleted_marker 是否等于 id」直接算出来
+SELECT g.id, g.goal_type, g.target_value, g.status, g.is_deleted, g.deleted_at, g.deleted_marker, (g.deleted_marker = g.id) AS marker_equals_id FROM health_goal g JOIN user_account u ON u.id = g.user_id WHERE u.username = 'acctest01' ORDER BY g.goal_type, g.id;
+
+
+--------------------------------------------------------------------------------
+A-1 看到什么算通过：共 5 行，goal_type 依次为  sleep, sleep, sport, water, weight
+--------------------------------------------------------------------------------
+
+goal_type        is_deleted  deleted_at                deleted_marker  marker_equals_id
+---------------  ----------  ------------------------  --------------  ----------------
+sleep(较小 id)   1          非空(如2026-09-14 12:2x:xx) 等于该行 id     1
+   ↑ ★ 这就是被软删的那条旧记录：
+       · is_deleted = 1                     → 已软删
+       · deleted_at 非空                    → 软删时间已写入
+       · deleted_marker = 该行 id           → ★ 关键，必须等于自身 id（不能是 0 或别的值）
+       · 该行仍能被查出来                    → ⇒ 物理行未被删除
+
+sleep(较大 id)   0          NULL                      0               0
+   ↑ ★ 这就是软删后「同类型立即重建」出来的那条新记录，
+      靠 id 与 is_deleted 与被软删的那条明确区分。
+
+sport            0          NULL                      0               0    （target_value = 150）
+water            0          NULL                      0               0    （target_value = 2500，被③修改过）
+weight           0          NULL                      0               0    （target_value = 66.0）
+
+提示：浏览器 Console 汇总区会打印「被软删的 sleep 目标 id」与「重建后的 sleep 目标 id」，
+      可与本表逐行对齐。
+
+
+-- A-2 只看软删行的等价查询（可选，同样只读）
+SELECT g.id, g.goal_type, g.is_deleted, g.deleted_at, g.deleted_marker, (g.deleted_marker = g.id) AS marker_equals_id FROM health_goal g JOIN user_account u ON u.id = g.user_id WHERE u.username = 'acctest01' AND g.is_deleted = 1;
+
+
+--------------------------------------------------------------------------------
+A-2 看到什么算通过：恰好 1 行
+--------------------------------------------------------------------------------
+is_deleted = 1 ；deleted_at 非空 ；deleted_marker 等于该行 id ；marker_equals_id = 1
+
+
+-- A-3 退出 MySQL
+exit
+
+
+
+================================================================================
+【第 B 段】清理本次验收产生的测试数据
+--------------------------------------------------------------------------------
+⚠ 顺序不可调换：先子表、后主表（本项目不使用外键，顺序靠人工保证）。
+⚠ 每一条都只针对 acctest01 / acctest02 这两个测试账号，不碰其它数据。
+⚠ 不使用 TRUNCATE、不做整表删除、不改表结构。
+================================================================================
+
+
+DELETE FROM record_tag    WHERE user_id IN (SELECT id FROM user_account WHERE username IN ('acctest01','acctest02'));
+DELETE FROM health_record WHERE user_id IN (SELECT id FROM user_account WHERE username IN ('acctest01','acctest02'));
+DELETE FROM health_goal   WHERE user_id IN (SELECT id FROM user_account WHERE username IN ('acctest01','acctest02'));
+DELETE FROM export_job    WHERE user_id IN (SELECT id FROM user_account WHERE username IN ('acctest01','acctest02'));
+DELETE FROM user_profile  WHERE user_id IN (SELECT id FROM user_account WHERE username IN ('acctest01','acctest02'));
+DELETE FROM user_session  WHERE user_id IN (SELECT id FROM user_account WHERE username IN ('acctest01','acctest02'));
+DELETE FROM user_account  WHERE username IN ('acctest01','acctest02');
+DELETE FROM login_failure_state WHERE username IN ('acctest01','acctest02');
+
+
+--------------------------------------------------------------------------------
+看到什么算通过
+--------------------------------------------------------------------------------
+每条执行后 MySQL 会回显  Query OK, N rows affected
+（N 为 0 或正数都正常；只要没有 ERROR 就是成功）
+
+
+================================================================================
+【第 C 段】最终核验（只读 SELECT）：8 张业务表应全部为 0
+================================================================================
+
+
+SELECT (SELECT COUNT(*) FROM user_account) AS u, (SELECT COUNT(*) FROM user_profile) AS p, (SELECT COUNT(*) FROM health_record) AS r, (SELECT COUNT(*) FROM health_goal) AS g, (SELECT COUNT(*) FROM user_session) AS s, (SELECT COUNT(*) FROM record_tag) AS t, (SELECT COUNT(*) FROM login_failure_state) AS l, (SELECT COUNT(*) FROM export_job) AS e;
+
+
+--------------------------------------------------------------------------------
+看到什么算通过
+--------------------------------------------------------------------------------
+一行 8 列，全部为 0：
+
+ u   p   r   g   s   t   l   e
+--- --- --- --- --- --- --- ---
+ 0   0   0   0   0   0   0   0
+
+
+================================================================================
+参考：若怀疑验收前库里有残留（可选，只读）
+--------------------------------------------------------------------------------
+SELECT id, username, created_at FROM user_account ORDER BY id;
+
+看到什么算通过：正常情况下应为空结果（Empty set）。
+如果验收开始前这里就有行，说明是历史遗留数据，第 B 段的清理只会删
+acctest01 / acctest02，不会动到它们，请先告知我。
+
+
+================================================================================
+边界声明
+================================================================================
+本文件只是人工验收用的「复制粘贴素材」，不修改任何代码 / 测试 / 脚本 / 数据库 /
+配置 / 文档；不涉及 git add / git commit；不代表 SEALED。
+================================================================================

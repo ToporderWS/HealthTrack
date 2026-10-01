@@ -1,0 +1,417 @@
+【S2 第四批 G-01~G-07 人工验收 · 复制粘贴素材 B：一键验收块（反引号免疫版）】
+
+修复原因（一句话）：磁盘上的原始文件反引号是完整的（40 个），
+问题出在"查看 / 复制"链路会吞掉反引号；本版【完全不使用反引号与模板字符串】，
+全部改为字符串拼接，因此即使反引号被吞也不会影响执行。
+八项判定项、期望值、验收标准与原来完全一致。
+
+使用方法：
+  1) 浏览器打开 http://127.0.0.1:5000/api/v1/health
+  2) 按 F12 -> 选 Console；若提示"请勿粘贴"，先手打 allow pasting 回车
+  3) 从下面「开始行」的下一行起，整段选中复制，粘贴到 Console 回车
+  4) 最后一行应为：合计 NN/NN 通过，0 项失败
+
+--- 一键验收块 开始（下一行起整段复制）---
+/* ===== 康迹 HealthTrack · S2 第四批 G-01~G-07 人工验收（一键块 · 无模板串版）=====
+   位置：浏览器 F12 -> Console（页面须停在 http://127.0.0.1:5000/api/v1/health）
+   账号：acctest01（本端）、acctest02（对端，用于验证隔离）
+   密码：Kangji2026（8~64 位、含字母与数字、无空格、不等于用户名）
+   说明：本版【不使用 ES6 模板字符串】，全部改为字符串拼接，
+        避免反引号在复制 / 查看环节被吞掉导致 Uncaught SyntaxError。
+        八项判定项、期望值、验收标准与原来完全一致，未改动任何业务逻辑。
+   ========================================================================= */
+(async () => {
+  const BASE = location.origin + '/api/v1';
+  const PWD = 'Kangji2026';
+  const UA = 'acctest01';
+  const UB = 'acctest02';
+
+  const R = [];
+  const ok = function (name, cond, extra) {
+    const tail = (extra === undefined || extra === null || extra === '') ? '' : '   → ' + extra;
+    R.push((cond ? '✔' : '✘') + ' ' + name + tail);
+  };
+  const D = function (r) { return (r && r.b && r.b.data) || {}; };
+  const ITEMS = function (r) { return D(r).items || []; };
+  const pad = function (n) { return String(n).padStart(2, '0'); };
+  const fmt = function (d) {
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+           pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  };
+  const nowS = function () { return fmt(new Date()); };
+  const dayAgoS = function () {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    d.setHours(9, 0, 0, 0);
+    return fmt(d);
+  };
+  const hoursAgoS = function (h) { return fmt(new Date(Date.now() - h * 3600 * 1000)); };
+
+  const call = async function (m, p, body, tok) {
+    const h = {};
+    if (body !== undefined) { h['Content-Type'] = 'application/json'; }
+    if (tok) { h['Authorization'] = 'Bearer ' + tok; }
+    const res = await fetch(BASE + p, {
+      method: m,
+      headers: h,
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    let j = null;
+    try { j = await res.json(); } catch (e) { j = null; }
+    return { s: res.status, b: j };
+  };
+
+  const boot = async function (u) {
+    await call('POST', '/auth/register', {
+      username: u, password: PWD, agreement_version: 'v1.0', agreement_accepted: true
+    });
+    const r = await call('POST', '/auth/login', { username: u, password: PWD });
+    if (r.s !== 200) {
+      throw new Error('账号 ' + u + ' 登录失败 HTTP ' + r.s +
+                      '（若曾改过密码，请先执行第 4 步清理，再重跑本块）');
+    }
+    return D(r).tokens.access_token;
+  };
+
+  const go = async function (title, fn) {
+    console.log('\n───── ' + title + ' ─────');
+    try { await fn(); }
+    catch (e) { R.push('✘ ' + title + ' 执行异常：' + (e && e.message)); }
+  };
+
+  let tA = null, tB = null;
+  let water = {}, sleepG = {}, sportG = {}, weightG = {}, rebuilt = {};
+
+  try {
+    console.log('准备两个测试账号 acctest01 / acctest02 …');
+    tA = await boot(UA);
+    tB = await boot(UB);
+    console.log('✅ 两个账号就绪');
+
+    /* ── 铺垫：档案 + 健康记录（不计入 8 项验收）── */
+    await go('[铺垫] 写入档案与健康记录', async function () {
+      await call('PUT', '/profile', {
+        nickname: '验收测试', gender: 1, birth_date: '1995-03-18',
+        height_cm: 175.0, initial_weight_kg: 72.5
+      }, tA);
+      await call('PUT', '/profile', {
+        nickname: '验收测试', gender: 1, birth_date: '1995-03-18', height_cm: 180.0
+      }, tB);
+      await call('POST', '/records', { metric_type: 'weight', value_1: 70.4, recorded_at: dayAgoS() }, tA);
+      await call('POST', '/records', { metric_type: 'water', value_1: 1000, recorded_at: nowS() }, tA);
+      await call('POST', '/records', { metric_type: 'water', value_1: 500, recorded_at: nowS() }, tA);
+      await call('POST', '/records', { metric_type: 'sport', value_1: 30, attr_1: 'running', recorded_at: nowS() }, tA);
+      await call('POST', '/records', { metric_type: 'sport', value_1: 20, attr_1: 'running', recorded_at: nowS() }, tA);
+      await call('POST', '/records', {
+        metric_type: 'sleep', value_1: 4, time_start: hoursAgoS(7.5), recorded_at: nowS()
+      }, tA);
+      console.log('已写入：体重 70.4（昨日）/ 饮水 1000+500（今日）/ 运动 30+20（本周）/ 睡眠 7.5 小时（今日）');
+    });
+
+    /* ── ① G-01 目标列表（空态 / 非法参数 / 未认证）── */
+    await go('① G-01 目标列表（空态 / 非法参数 / 未认证）', async function () {
+      let r = await call('GET', '/goals', undefined, tB);
+      ok('G-01 无目标 → 返回 items: []（不是 404）',
+         r.s === 200 && Array.isArray(D(r).items) && D(r).items.length === 0, 'HTTP ' + r.s);
+      ok('G-01 非法 goal_type → 400 INVALID_PARAM',
+         (await call('GET', '/goals?goal_type=bp', undefined, tA)).s === 400);
+      r = await call('GET', '/goals');
+      ok('G-01 未认证 → 401 UNAUTHENTICATED',
+         r.s === 401 && !!r.b && r.b.code === 'UNAUTHENTICATED', 'HTTP ' + r.s);
+    });
+
+    /* ── ② G-02 创建目标 ── */
+    await go('② G-02 创建目标', async function () {
+      let r = await call('POST', '/goals', { goal_type: 'water', target_value: 2000 }, tA);
+      water = D(r).goal || {};
+      ok('G-02 water 创建成功（HTTP 201）', r.s === 201, 'HTTP ' + r.s);
+      ok('G-02 服务端强制 period_type=daily / unit=ml',
+         water.period_type === 'daily' && water.unit === 'ml',
+         String(water.period_type) + ' / ' + String(water.unit));
+      ok('G-02 返回文案 = 目标已创建', !!r.b && r.b.message === '目标已创建');
+
+      r = await call('POST', '/goals', { goal_type: 'water', target_value: 2500 }, tA);
+      ok('G-02 同类目标已存在 → 409 GOAL_TYPE_EXISTS',
+         r.s === 409 && !!r.b && r.b.code === 'GOAL_TYPE_EXISTS', 'HTTP ' + r.s);
+
+      r = await call('POST', '/goals', {
+        goal_type: 'sport', target_value: 150, attr_1: 'min', period_type: 'daily'
+      }, tA);
+      ok('G-02 period_type 与类型不符（sport 传 daily）→ 422', r.s === 422, 'HTTP ' + r.s);
+
+      r = await call('POST', '/goals', { goal_type: 'sport', target_value: 150 }, tA);
+      ok('G-02 sport 未传 attr_1 → 422（errors[].field = attr_1）',
+         r.s === 422 && (r.b.errors || []).some(function (e) { return e.field === 'attr_1'; }),
+         'HTTP ' + r.s);
+
+      ok('G-02 目标值不可能（sleep 30 小时）→ 422 硬拦截',
+         (await call('POST', '/goals', { goal_type: 'sleep', target_value: 30 }, tA)).s === 422);
+
+      r = await call('POST', '/goals', { goal_type: 'sleep', target_value: 20 }, tA);
+      ok('G-02 超出常见范围 → 200 SOFT_WARNING（本次未写入）',
+         r.s === 200 && !!r.b && r.b.code === 'SOFT_WARNING' && D(r).requires_confirm === true,
+         'HTTP ' + r.s);
+      ok('G-02 软提示带 warnings[]、且不带 errors[]',
+         !!r.b && !('errors' in r.b) && Array.isArray(D(r).warnings) && D(r).warnings.length > 0);
+
+      r = await call('POST', '/goals', { goal_type: 'sleep', target_value: 8 }, tA);
+      sleepG = D(r).goal || {};
+      ok('G-02 sleep 创建成功 + unit=hour + period_type=daily',
+         r.s === 201 && sleepG.unit === 'hour' && sleepG.period_type === 'daily', 'HTTP ' + r.s);
+
+      r = await call('POST', '/goals', { goal_type: 'sport', target_value: 150, attr_1: 'min' }, tA);
+      sportG = D(r).goal || {};
+      ok('G-02 sport(min) 创建成功 + unit=min + period_type=weekly',
+         r.s === 201 && sportG.unit === 'min' && sportG.period_type === 'weekly', 'HTTP ' + r.s);
+
+      r = await call('POST', '/goals', {
+        goal_type: 'weight', target_value: 66.0, auto_start_weight: true, target_date: '2026-12-31'
+      }, tA);
+      weightG = D(r).goal || {};
+      ok('G-02 weight 创建成功 + 起始体重自动取最近体重 70.4',
+         r.s === 201 && weightG.start_weight_kg === 70.4,
+         'HTTP ' + r.s + '  起始体重=' + String(weightG.start_weight_kg));
+
+      ok('G-02 weight 目标值 == 起始体重 → 422',
+         (await call('POST', '/goals', {
+           goal_type: 'weight', target_value: 70.4, start_weight_kg: 70.4
+         }, tA)).s === 422);
+      ok('G-02 请求携带 user_id → 400 INVALID_PARAM',
+         (await call('POST', '/goals', {
+           goal_type: 'water', target_value: 2000, user_id: 1
+         }, tA)).s === 400);
+    });
+
+    /* ── ① G-01 目标列表（有数据 / 排序 / 过滤 / 字段集）── */
+    await go('① G-01 目标列表（有数据 / 排序 / 过滤 / 字段集）', async function () {
+      const r = await call('GET', '/goals', undefined, tA);
+      const items = ITEMS(r);
+      const types = items.map(function (i) { return i.goal_type; }).join(',');
+      ok('G-01 返回 4 类目标，且按 goal_type 升序',
+         r.s === 200 && types === 'sleep,sport,water,weight', 'HTTP ' + r.s + '  ' + types);
+      ok('G-01 条目不暴露 is_deleted / deleted_marker / deleted_at',
+         items.length > 0 && items.every(function (i) {
+           return !('is_deleted' in i) && !('deleted_marker' in i) && !('deleted_at' in i);
+         }));
+      ok('G-01 status_text 仅为中性值 ongoing / paused / archived',
+         items.every(function (i) {
+           return ['ongoing', 'paused', 'archived'].indexOf(i.status_text) >= 0;
+         }));
+      ok('G-01 goal_type=water 过滤生效',
+         ITEMS(await call('GET', '/goals?goal_type=water', undefined, tA))
+           .map(function (i) { return i.goal_type; }).join(',') === 'water');
+      ok('G-01 include_history=true 可用（HTTP 200）',
+         (await call('GET', '/goals?include_history=true', undefined, tA)).s === 200);
+    });
+
+    /* ── ⑦ G-07 目标完成度 ── */
+    await go('⑦ G-07 目标完成度（四类算法 / 达标率 / 窗口 / 404）', async function () {
+      const r = await call('GET', '/goals/progress', undefined, tA);
+      const P = {};
+      ITEMS(r).forEach(function (i) { P[i.goal_type] = i; });
+      ok('G-07 200 且返回 4 条完成度',
+         r.s === 200 && Object.keys(P).length === 4, 'HTTP ' + r.s);
+      ok('G-07 water 当日 1500/2000 = 75.0，remaining_text = 还差 500 ml',
+         !!P.water && P.water.current_value === 1500 && P.water.progress_percent === 75.0 &&
+           P.water.remaining_text === '还差 500 ml',
+         P.water ? (String(P.water.current_value) + ' / ' + String(P.water.progress_percent) + '% / ' +
+                    String(P.water.remaining_text)) : 'missing');
+      ok('G-07 sport 本周 50/150 = 33.3，period_label = this_week',
+         !!P.sport && P.sport.current_value === 50 && P.sport.progress_percent === 33.3 &&
+           P.sport.period_label === 'this_week',
+         P.sport ? (String(P.sport.current_value) + ' / ' + String(P.sport.progress_percent) + '%') : 'missing');
+      ok('G-07 weight (70.4→66.0) = 0.0%，rate 恒为 null，period_label = overall',
+         !!P.weight && P.weight.progress_percent === 0.0 && P.weight.rate === null &&
+           P.weight.period_label === 'overall',
+         P.weight ? (String(P.weight.progress_percent) + '%  rate=' + String(P.weight.rate)) : 'missing');
+      ok('G-07 sleep 当日派生 7.5/8 = 93.8',
+         !!P.sleep && P.sleep.current_value === 7.5 && P.sleep.progress_percent === 93.8,
+         P.sleep ? (String(P.sleep.current_value) + ' / ' + String(P.sleep.progress_percent) + '%') : 'missing');
+      ok('G-07 water 有达标率 rate（daily），weight 无 rate',
+         !!P.water && !!P.water.rate && typeof P.water.rate === 'object' && !P.weight.rate);
+      ok('G-07 rate_window=7 生效（window_days = 7）',
+         (((ITEMS(await call('GET', '/goals/progress?rate_window=7', undefined, tA))[0] || {})
+           .rate) || {}).window_days === 7);
+      ok('G-07 rate_window 非法（45）→ 400 INVALID_PARAM',
+         (await call('GET', '/goals/progress?rate_window=45', undefined, tA)).s === 400);
+      ok('G-07 goal_id 不存在 → 404',
+         (await call('GET', '/goals/progress?goal_id=99999999', undefined, tA)).s === 404);
+      ok('G-07 跨用户 goal_id → 404（不泄露资源是否存在）',
+         (await call('GET', '/goals/progress?goal_id=' + water.id, undefined, tB)).s === 404);
+    });
+
+    /* ── ③ G-03 修改目标 ── */
+    await go('③ G-03 修改目标', async function () {
+      const r = await call('PATCH', '/goals/' + water.id, { target_value: 2500 }, tA);
+      ok('G-03 修改目标值成功（HTTP 200，目标值变为 2500）',
+         r.s === 200 && (D(r).goal || {}).target_value === 2500,
+         'HTTP ' + r.s + '  目标值=' + String((D(r).goal || {}).target_value));
+      ok('G-03 请求中出现 goal_type → 422（不允许改类型）',
+         (await call('PATCH', '/goals/' + water.id, {
+           goal_type: 'water', target_value: 2500
+         }, tA)).s === 422);
+      ok('G-03 试图修改 start_weight_kg → 422',
+         (await call('PATCH', '/goals/' + weightG.id, { start_weight_kg: 70.0 }, tA)).s === 422);
+      ok('G-03 跨用户修改 → 404',
+         (await call('PATCH', '/goals/' + water.id, { target_value: 2500 }, tB)).s === 404);
+    });
+
+    /* ── ④ G-04 暂停 ／ ⑤ G-05 恢复 ── */
+    await go('④ G-04 暂停目标 ／ ⑤ G-05 恢复目标', async function () {
+      let r = await call('POST', '/goals/' + water.id + '/pause', undefined, tA);
+      ok('G-04 暂停成功（200，changed=true，status=0）',
+         r.s === 200 && D(r).changed === true && D(r).status === 0, 'HTTP ' + r.s);
+      ok('G-04 重复暂停（幂等）→ changed=false',
+         D(await call('POST', '/goals/' + water.id + '/pause', undefined, tA)).changed === false);
+      ok('G-04 status_text = paused（中性表达）',
+         (ITEMS(await call('GET', '/goals', undefined, tA))
+           .filter(function (i) { return i.id === water.id; })[0] || {}).status_text === 'paused');
+      ok('G-04 include_paused=false 时暂停目标被过滤',
+         ITEMS(await call('GET', '/goals?include_paused=false', undefined, tA))
+           .every(function (i) { return i.id !== water.id; }));
+      r = await call('POST', '/goals/' + water.id + '/resume', undefined, tA);
+      ok('G-05 恢复成功（200，changed=true）',
+         r.s === 200 && D(r).changed === true, 'HTTP ' + r.s);
+      ok('G-05 重复恢复（幂等）→ changed=false',
+         D(await call('POST', '/goals/' + water.id + '/resume', undefined, tA)).changed === false);
+      ok('G-04/G-05 跨用户操作 → 404',
+         (await call('POST', '/goals/' + water.id + '/pause', undefined, tB)).s === 404);
+    });
+
+    /* ── ⑦ D-G3 暂停目标仍返回完整完成度 ── */
+    await go('⑦ D-G3 暂停目标仍返回完整完成度', async function () {
+      await call('POST', '/goals/' + water.id + '/pause', undefined, tA);
+      const r = await call('GET', '/goals/progress?goal_id=' + water.id, undefined, tA);
+      const p = ITEMS(r)[0] || {};
+      ok('★ D-G3 暂停目标 status=0，但仍返回完整完成度（1500/2500 = 60.0%）',
+         p.status === 0 && p.current_value === 1500 && p.progress_percent === 60.0,
+         'status=' + String(p.status) + '  current=' + String(p.current_value) +
+         '  ' + String(p.progress_percent) + '%');
+      await call('POST', '/goals/' + water.id + '/resume', undefined, tA);
+    });
+
+    /* ── ⑥ G-06 删除目标（软删）── */
+    await go('⑥ G-06 删除目标（软删）', async function () {
+      let r = await call('DELETE', '/goals/' + sleepG.id, undefined, tA);
+      ok('G-06 删除成功（200，deleted_count=1）',
+         r.s === 200 && D(r).deleted_count === 1, 'HTTP ' + r.s);
+      ok('G-06 软删后默认列表不可见',
+         ITEMS(await call('GET', '/goals', undefined, tA))
+           .every(function (i) { return i.id !== sleepG.id; }));
+      const hist = ITEMS(await call('GET', '/goals?include_history=true', undefined, tA))
+        .filter(function (i) { return i.id === sleepG.id; });
+      ok('G-06 历史中仍有该行且 status_text = archived（⇒ 物理行保留、is_deleted=1）',
+         hist.length === 1 && hist[0].status_text === 'archived', '历史行数=' + String(hist.length));
+      ok('G-06 重复删除 → 404 RESOURCE_NOT_FOUND',
+         (await call('DELETE', '/goals/' + sleepG.id, undefined, tA)).s === 404);
+      ok('G-06 历史目标不可编辑 → 404',
+         (await call('PATCH', '/goals/' + sleepG.id, { target_value: 9 }, tA)).s === 404);
+      r = await call('POST', '/goals', { goal_type: 'sleep', target_value: 8 }, tA);
+      rebuilt = D(r).goal || {};
+      ok('★ G-06 同类型可立即重建（⇒ deleted_marker 已写入 id 并释放唯一约束）',
+         r.s === 201 && rebuilt.id !== sleepG.id,
+         'HTTP ' + r.s + '  新 id=' + String(rebuilt.id));
+      ok('G-06 跨用户删除 → 404',
+         (await call('DELETE', '/goals/' + sleepG.id, undefined, tB)).s === 404);
+    });
+
+    /* ── ⑧ 用户隔离 / user_id 注入 ── */
+    await go('⑧ 用户隔离 / user_id 注入', async function () {
+      const r = await call('GET', '/goals', undefined, tB);
+      ok('隔离：对端看不到本端任何目标（列表为空）',
+         ITEMS(r).length === 0, '对端条数=' + String(ITEMS(r).length));
+      ok('隔离：注入 user_id（查询参数）→ 400',
+         (await call('GET', '/goals?user_id=1', undefined, tA)).s === 400);
+      ok('隔离：注入 user_id（请求体）→ 400',
+         (await call('POST', '/goals', {
+           goal_type: 'water', target_value: 2000, user_id: 1
+         }, tA)).s === 400);
+      console.log('提示：对端修改 / 删除 / 暂停本端目标均返回 404，已在上文各项中分别验证。');
+    });
+
+  } catch (e) {
+    R.push('✘ 脚本中途异常：' + (e && e.message));
+  } finally {
+    console.log('\n════════ 验收结果汇总 ════════');
+    console.log(R.join('\n'));
+    const bad = R.filter(function (x) { return x.indexOf('✘') === 0; }).length;
+    console.log('\n合计 ' + (R.length - bad) + '/' + R.length + ' 通过，' + bad + ' 项失败');
+    console.log('\n【第 3 步 G-06 数据库直查需要用到】');
+    console.log('  本端账号 = ' + UA);
+    console.log('  被软删的 sleep 目标 id = ' + String(sleepG.id === undefined ? '（未获取）' : sleepG.id));
+    console.log('  重建后的 sleep 目标 id = ' + String(rebuilt.id === undefined ? '（未获取）' : rebuilt.id));
+    if (bad) {
+      console.log('\n失败明细：');
+      R.filter(function (x) { return x.indexOf('✘') === 0; })
+       .forEach(function (x) { console.log('  ' + x); });
+    }
+    try {
+      window.__acc = { R: R, tA: tA, tB: tB, UA: UA, UB: UB,
+                       water: water, sleepG: sleepG, sportG: sportG,
+                       weightG: weightG, rebuilt: rebuilt };
+      console.log('\n（已把本次结果挂到 window.__acc，便于复查）');
+    } catch (e2) { /* ignore */ }
+  }
+})();
+
+--- 一键验收块 结束 ---
+
+──────────────────────── 八项判定对照（看到什么算通过）────────────────────────
+
+① G-01 目标列表
+   关键行：G-01 无目标 → 返回 items: []（不是 404）
+           G-01 非法 goal_type → 400 INVALID_PARAM
+           G-01 未认证 → 401 UNAUTHENTICATED
+           G-01 返回 4 类目标，且按 goal_type 升序 → sleep,sport,water,weight
+           G-01 条目不暴露 is_deleted / deleted_marker / deleted_at
+           G-01 goal_type=water 过滤生效
+   通过标准：全部 ✔；空列表返回 [] 而非 404；内部软删字段完全不出现。
+
+② G-02 创建目标
+   关键行：water 201 / 服务端强制 daily+ml / 同类 409 GOAL_TYPE_EXISTS
+           period_type 不符 422 / sport 缺 attr_1 422 / sleep 30 小时 422 硬拦截
+           sleep 20 小时 → 200 SOFT_WARNING（未写入）/ 软提示带 warnings 不带 errors
+           sleep 201 / sport(min) 201 / weight 201 且起始体重自动取 70.4
+           weight 目标值 == 起始体重 422 / 携带 user_id 400
+   通过标准：全部 ✔；周期与单位由服务端决定；软提示是 200 + 不写入，不是错误。
+
+③ G-03 修改目标
+   关键行：修改目标值成功（200，变为 2500）/ 出现 goal_type → 422
+           修改 start_weight_kg → 422 / 跨用户修改 → 404
+   通过标准：全部 ✔；类型与起始体重不可改；跨用户一律 404。
+
+④ G-04 暂停
+   关键行：暂停成功（200，changed=true，status=0）/ 重复暂停 → changed=false
+           status_text = paused / include_paused=false 时被过滤
+   通过标准：全部 ✔；第二次暂停不报错，而是 changed:false。
+
+⑤ G-05 恢复
+   关键行：恢复成功（200，changed=true）/ 重复恢复 → changed=false
+           跨用户操作 → 404
+   通过标准：全部 ✔；同样幂等；跨用户 404。
+
+⑥ G-06 删除
+   关键行：删除成功（200，deleted_count=1）/ 软删后默认列表不可见
+           历史中仍有该行且 status_text = archived
+           重复删除 → 404 / 历史目标不可编辑 → 404
+           ★ 同类型可立即重建 / 跨用户删除 → 404
+   通过标准：全部 ✔；物理行仍存在 + is_deleted=1 由"历史里仍能查到且为 archived"证明；
+             deleted_marker=id 由"同类型可立即重建"证明；deleted_at 非空必须做第 3 步。
+
+⑦ G-07 完成度
+   关键行：water 1500/2000 = 75.0，remaining_text = 还差 500 ml
+           sport 本周 50/150 = 33.3，period_label = this_week
+           weight (70.4→66.0) = 0.0%，rate 恒为 null，period_label = overall
+           sleep 当日派生 7.5/8 = 93.8
+           water 有达标率 rate（daily），weight 无 rate
+           rate_window=7 生效 / rate_window 非法 400 / goal_id 不存在 404 / 跨用户 goal_id 404
+           ★ D-G3 暂停目标 status=0，但仍返回完整完成度（1500/2500 = 60.0%）
+   通过标准：全部 ✔；四算法数值 75.0 / 33.3 / 0.0 / 93.8；weight 的 rate 必须 null；
+             ★ 暂停目标仍返 60.0%（不是 null、不是 0）。
+
+⑧ 用户隔离
+   关键行：对端看不到本端任何目标（列表为空）
+           注入 user_id（查询参数）→ 400 / 注入 user_id（请求体）→ 400
+   通过标准：全部 ✔；对端既看不到也改不动；user_id 一出现即 400。
+
+总判定：最后一行须为「合计 NN/NN 通过，0 项失败」，只有 0 项失败才算 8 项全部通过。

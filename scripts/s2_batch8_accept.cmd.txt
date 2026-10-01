@@ -1,0 +1,95 @@
+【S2 第八批 A-07 注销账号 · 人工验收 · 复制粘贴素材 A：启动与一键核验命令】
+
+口径提醒（本机硬约束）：
+  - Git Bash 基础命令（ls / grep / head / tail / cat / npx）大面积缺失；
+    本素材**不使用任何管道**，所有脚本自身落盘 stdout/stderr。
+  - 判定"是否执行成功"以【落盘产物 + 退出码】为准，**不以控制台是否为空为准**。
+  - 原有 S2 第一~第七批脚本/测试**不重跑、不修改**；本批回归判定**只用** verify_s2_batch8.py。
+  - **A-07 是破坏性操作（注销账号）**：所有验收只针对本批自建测试账号
+    （pytest: tst* ；smoke: tstb8smokea/b/c/d ；Edge: tstb8edgea/b）。
+    **绝不对任何非测试账号执行注销**。
+  - A-07 成功响应 `data` 恰 1 键 `account_closed=true`；**不返回删除条数**；
+    库侧证据须用素材 B 的只读 SQL 获取。
+
+────────────────────────────────────────────────────────────
+[第 0 步] 启动后端（另开窗口，保持运行）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo/backend
+  ./.venv/Scripts/python.exe wsgi.py
+
+  校验：浏览器打开 http://127.0.0.1:5000/api/v1/health  ->  {"code":"OK",...}
+
+────────────────────────────────────────────────────────────
+[第 1 步] 本批自动化测试（batch8 用例）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo/backend
+  ./.venv/Scripts/python.exe -m pytest tests/batch8 -q -p no:cacheprovider -p no:tmpdir > ../.workbuddy/_b8test.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行形如  NN passed in NN.NNs
+  说明：必须带 -p no:cacheprovider -p no:tmpdir
+        （本机沙箱对 pytest 自带 tmp/cache 目录的 shutil.rmtree 清理会拦截；
+          batch8 装置改用 tempfile.mkdtemp 自建导出根，不触碰项目 storage）。
+
+────────────────────────────────────────────────────────────
+[第 2 步] 真实 HTTP 联调（四账号 -> 造数 -> A-07 全路径 -> 断言 -> 清理）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo
+  backend/.venv/Scripts/python.exe scripts/s2_batch8_http_smoke.py > .workbuddy/_b8smoke.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行  合计 NN/NN PASS，0 FAIL
+  说明：后端必须先启动（第 0 步）；脚本收尾会**白名单内**物理删除
+        tstb8smokea / tstb8smokeb / tstb8smokec / tstb8smoked 四个测试账号
+        及其业务数据，并删除本次创建过的导出文件。
+  C6/T4 说明：smoke 的 tstb8smokec 段会**故意**让导出文件处于被占用状态，
+        以在真实 HTTP 下复现"文件删除失败 -> 仍返回 200 + 写脱敏重试登记
+        (backend/storage/cleanup_retry.jsonl) + 下一次注销流程顺带重放( drain )"。
+
+────────────────────────────────────────────────────────────
+[第 3 步] 浏览器 Console 一键验收（见素材 C：s2_batch8_accept.console.txt）
+────────────────────────────────────────────────────────────
+  1) 浏览器打开 http://127.0.0.1:5000/api/v1/health
+  2) F12 -> Console；如提示"请勿粘贴"，先手打 allow pasting 回车
+  3) 从素材 C 的「开始行」下一行起整段复制，粘到 Console 回车
+  4) 最后一行须为：合计 NN/NN 通过，0 项失败（期望 66/66）
+
+  注意：Edge 脚本会注销 tstb8edgea（主体）、保留 tstb8edgeb（对端）；
+        账号无法全部用 API 删除，请用素材 B 第 3 段 SQL 收尾清理。
+
+────────────────────────────────────────────────────────────
+[第 4 步] 数据库只读核查（见素材 B：s2_batch8_accept.sql.txt）
+────────────────────────────────────────────────────────────
+  全程仅 SELECT / SHOW / DESCRIBE；不 commit、不改结构。
+  A-07 后 8 张业务表（按本批账号 id / username）应**全部归零**；
+  结构应仍为 9 表 / 17 非主键索引(DISTINCT) / 0 外键 / 0001_initial_schema（**无 0002_**）。
+
+────────────────────────────────────────────────────────────
+[第 5 步] 本批核验脚本（**唯一回归判定依据**）
+────────────────────────────────────────────────────────────
+  cd /c/Users/Toporder-WS/Desktop/Demo
+  backend/.venv/Scripts/python.exe scripts/verify_s2_batch8.py > .workbuddy/_b8verify.txt 2>&1; echo "EXIT=$?"
+  backend/.venv/Scripts/python.exe scripts/verify_s2_batch8.py --db > .workbuddy/_b8verify_db.txt 2>&1; echo "EXIT=$?"
+
+  期望：EXIT=0；落盘末行  合计 NN/NN PASS，0 FAIL
+  建议顺序：第 3 步（Edge）-> 素材 B 第 3 段 SQL 清理 -> 再跑第 5 步 --db，
+            以保证 [F-DB] 段"无 tst 残留 / storage/exports 为 0 文件"成立。
+
+────────────────────────────────────────────────────────────
+[第 6 步] 历史时点守卫脚本的**预期 FAIL**（勿当 bug 修）
+────────────────────────────────────────────────────────────
+  以下脚本把**当时**的接口集合硬编码，本批注册 A-07（DELETE /api/v1/users/me）后必然 FAIL：
+    - scripts/verify_s2_batch7.py（含"A-07 未注册"判据，并硬编码 33 接口 / 26 路径）
+    - scripts/verify_s2_batch6.py（硬编码"接口 31 / 路径 24"）
+    - backend/tests/batch5/test_batch5_scope_guard.py
+    - backend/tests/batch6/test_batch6_scope_guard.py
+    - backend/tests/batch7/test_batch7_scope_guard.py
+  处置：**零改动 + 显式豁免**（历史时点判据）。本批回归判定只看 verify_s2_batch8.py。
+
+────────────────────────────────────────────────────────────
+[顺序约束]
+────────────────────────────────────────────────────────────
+  - 第 4 步之前**不得**清理测试账号（否则直查不到 A-07 库侧证据）。
+  - 第 5 步的 [D] 段以**本批开工点**（Step 0 预检报告）为界判定封板保护；
+    不得改写本批产物（app/__init__.py、app/services/account_service.py、
+    app/api/v1/account.py、tests/batch8/**、scripts/*batch8*、根目录 Edge 脚本）。
+  - 本批**不新增数据库结构变更**：应仍为 9 表 / 17 非主键索引 / 0 外键 / 0001_initial_schema。
+  - 本批**不产生** 0002_* 迁移；**不新增**任何错误码（A-07 只复用既有码）。

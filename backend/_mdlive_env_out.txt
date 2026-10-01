@@ -1,0 +1,13 @@
+APP_ENV(env)             = None
+DEFAULT_ENV(const)       = 'development'
+exists(.env.development) = True
+exists(.env)             = False
+resolved APP_ENV         = 'development'
+MAIL_BACKEND             = 'smtp'
+SMTP_HOST                = 'smtp.gmail.com'
+SMTP_PORT                = 587
+SMTP_USE_TLS             = 'true'
+SMTP_TIMEOUT             = 10
+SMTP_USERNAME_PRESENT    = YES
+SMTP_PASSWORD_PRESENT    = YES
+SMTP_FROM_PRESENT        = YES

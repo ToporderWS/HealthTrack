@@ -1,0 +1,186 @@
+【S2 第七批 D-01~D-02 数据总览 / 清空全部数据 · 人工验收 · 复制粘贴素材 B：数据库只读核查 + 收尾清理】
+
+口径：
+  - 第 1~2 段：**只读**（SELECT / SHOW），不 commit、不改结构、不改任何业务数据。
+  - 第 3 段：**收尾清理**，仅针对本批 Edge 验收账号 tstb7edgea / tstb7edgeb，
+    逐表 DELETE（非 TRUNCATE）；执行前先确认白名单两账号 id 非 NULL。
+  - 数据库：kangji_healthtrack（MySQL 8.0.33）。
+  - 顺序：先跑素材 C（第 3 步）且**尚未清理**时执行第 1~2 段；第 3 段在核查完成后再执行。
+  - 结构事实（冻结，供比对）：
+      user_session        —— 失效标记是 revoked_at（**没有** is_revoked 列）；
+                              计数列 = export_pwd_fail_count / change_pwd_fail_count；
+      login_failure_state —— 主键业务键是 username（**没有** user_id 列）；
+      user_profile        —— **没有** is_deleted / deleted_at（档案行**不软删**）；
+                              6 个健康字段 = height_cm / initial_weight_kg / blood_type /
+                              medical_history / allergy_history / medication_notes；
+                              保留字段 = nickname / gender / birth_date；
+      health_goal         —— 含 deleted_marker 列（D-02 软删时写 deleted_marker = id）。
+
+════════════════════════════════════════════════════════════════
+第 0 段：连接
+════════════════════════════════════════════════════════════════
+USE kangji_healthtrack;
+
+════════════════════════════════════════════════════════════════
+第 1 段：结构指纹（应：9 表 / 17 非主键索引 / 0 外键 / 迁移 0001）
+         —— 本批**不得**产生任何结构变更（无 0002_*）
+════════════════════════════════════════════════════════════════
+SELECT COUNT(*) AS tables_cnt
+FROM information_schema.tables WHERE table_schema = DATABASE();
+
+SELECT COUNT(DISTINCT index_name) AS nonpk_index_cnt
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY';
+
+SELECT COUNT(*) AS fk_cnt
+FROM information_schema.table_constraints
+WHERE table_schema = DATABASE() AND constraint_type = 'FOREIGN KEY';
+
+SELECT version_num AS alembic_version FROM alembic_version;
+
+-- 1.1 user_profile：不得有软删列；6 个健康字段齐备
+SELECT COUNT(*) AS user_profile_softdelete_col_cnt
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = 'user_profile'
+  AND column_name IN ('is_deleted', 'deleted_at');
+
+SELECT COUNT(*) AS user_profile_health_col_cnt
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = 'user_profile'
+  AND column_name IN ('height_cm', 'initial_weight_kg', 'blood_type',
+                      'medical_history', 'allergy_history', 'medication_notes');
+
+-- 1.2 health_goal：deleted_marker 列必须存在（D-02 依赖它释放唯一约束）
+SELECT column_name, column_type
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = 'health_goal'
+  AND column_name IN ('is_deleted', 'deleted_at', 'deleted_marker');
+
+SELECT index_name, GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols, non_unique
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'health_goal'
+GROUP BY index_name, non_unique;
+
+════════════════════════════════════════════════════════════════
+第 2 段：D-01 / D-02 数据核查（Edge 验收后**立即**执行）
+════════════════════════════════════════════════════════════════
+SET @a := (SELECT id FROM user_account WHERE username = 'tstb7edgea');
+SET @b := (SELECT id FROM user_account WHERE username = 'tstb7edgeb');
+SELECT @a AS aid, @b AS bid;   -- 期望两值非 NULL
+
+-- 2.1 health_record：D-02 后应**物理行保留**、全部 is_deleted = 1、deleted_at 非 NULL
+SELECT r.id, r.user_id, r.metric_type, r.recorded_at,
+       r.is_deleted, r.deleted_at
+FROM health_record r
+WHERE r.user_id IN (@a, @b)
+ORDER BY r.user_id, r.id;
+
+SELECT user_id,
+       COUNT(*)                                   AS rows_total,
+       SUM(r.is_deleted = 0)                      AS alive_rows,
+       SUM(r.is_deleted = 1)                      AS softdeleted_rows,
+       SUM(r.is_deleted = 1 AND r.deleted_at IS NULL) AS bad_rows_missing_deleted_at
+FROM health_record r
+WHERE r.user_id IN (@a, @b)
+GROUP BY user_id;
+
+-- 2.2 record_tag：应随主记录同步软删（无活跃标签残留）
+SELECT user_id, COUNT(*) AS rows_total,
+       SUM(t.is_deleted = 0) AS alive_rows,
+       SUM(t.is_deleted = 1) AS softdeleted_rows
+FROM record_tag t
+WHERE t.user_id IN (@a, @b)
+GROUP BY user_id;
+
+-- 2.3 health_goal：软删且 deleted_marker = id（用于释放同类型唯一约束）
+SELECT g.id, g.user_id, g.goal_type, g.status,
+       g.is_deleted, g.deleted_at, g.deleted_marker,
+       (g.deleted_marker = g.id) AS marker_equals_id
+FROM health_goal g
+WHERE g.user_id IN (@a, @b)
+ORDER BY g.user_id, g.id;
+
+-- 2.4 user_profile：**行必须保留**；6 健康字段全 NULL；昵称/性别/出生日期保留
+SELECT p.user_id, p.nickname, p.gender, p.birth_date,
+       p.height_cm, p.initial_weight_kg, p.blood_type,
+       p.medical_history, p.allergy_history, p.medication_notes,
+       (p.height_cm IS NULL AND p.initial_weight_kg IS NULL AND p.blood_type IS NULL
+        AND p.medical_history IS NULL AND p.allergy_history IS NULL
+        AND p.medication_notes IS NULL)                            AS health_all_null,
+       (p.nickname IS NOT NULL OR p.gender IS NOT NULL OR p.birth_date IS NOT NULL) AS keep_any
+FROM user_profile p
+WHERE p.user_id IN (@a, @b);
+
+-- 2.5 保留项核查：账号 / 会话 / 导出任务 / 登录失败状态
+SELECT COUNT(*) AS account_rows FROM user_account WHERE id IN (@a, @b);
+
+SELECT user_id, COUNT(*) AS session_rows,
+       GROUP_CONCAT(DISTINCT export_pwd_fail_count)   AS export_pwd_fail_counts,
+       GROUP_CONCAT(DISTINCT change_pwd_fail_count)   AS change_pwd_fail_counts
+FROM user_session WHERE user_id IN (@a, @b) GROUP BY user_id;
+
+SELECT user_id, COUNT(*) AS export_job_rows FROM export_job
+WHERE user_id IN (@a, @b) GROUP BY user_id;
+
+-- D-02 密码错误**不应**写入 login_failure_state（期望 0 行）
+SELECT COUNT(*) AS login_failure_rows
+FROM login_failure_state WHERE username IN ('tstb7edgea', 'tstb7edgeb');
+
+-- 2.6 隔离自证：非测试账号一律不应被波及（列出现有非 tst 账号）
+SELECT id, username, created_at FROM user_account
+WHERE username NOT LIKE 'tst%' ORDER BY id;
+
+-- 2.7 各表行数（清理前留痕）
+SELECT 'user_account'   AS tbl, COUNT(*) AS rows_cnt FROM user_account
+UNION ALL SELECT 'user_profile',        COUNT(*) FROM user_profile
+UNION ALL SELECT 'health_record',       COUNT(*) FROM health_record
+UNION ALL SELECT 'record_tag',          COUNT(*) FROM record_tag
+UNION ALL SELECT 'health_goal',         COUNT(*) FROM health_goal
+UNION ALL SELECT 'user_session',        COUNT(*) FROM user_session
+UNION ALL SELECT 'login_failure_state', COUNT(*) FROM login_failure_state
+UNION ALL SELECT 'export_job',          COUNT(*) FROM export_job;
+
+════════════════════════════════════════════════════════════════
+第 3 段：收尾清理（**仅** tstb7edgea / tstb7edgeb）
+         —— 本批 D-02 只清业务数据、**保留账号**，故测试账号须在此收尾
+════════════════════════════════════════════════════════════════
+SET @a := (SELECT id FROM user_account WHERE username = 'tstb7edgea');
+SET @b := (SELECT id FROM user_account WHERE username = 'tstb7edgeb');
+SELECT @a AS aid, @b AS bid;   -- 清理前确认：两值应非 NULL
+
+DELETE FROM record_tag          WHERE user_id IN (@a, @b);
+DELETE FROM health_record       WHERE user_id IN (@a, @b);
+DELETE FROM health_goal         WHERE user_id IN (@a, @b);
+DELETE FROM export_job          WHERE user_id IN (@a, @b);
+DELETE FROM user_session        WHERE user_id IN (@a, @b);
+DELETE FROM user_profile        WHERE user_id IN (@a, @b);
+DELETE FROM login_failure_state WHERE username IN ('tstb7edgea', 'tstb7edgeb');
+DELETE FROM user_account        WHERE id IN (@a, @b);
+COMMIT;
+
+-- 3.1 清理后自证：应为 0 / 0 / 0
+SELECT COUNT(*) AS left_accounts
+FROM user_account WHERE username IN ('tstb7edgea', 'tstb7edgeb');
+
+SELECT COUNT(*) AS left_records
+FROM health_record r JOIN user_account a ON a.id = r.user_id
+WHERE a.username IN ('tstb7edgea', 'tstb7edgeb');
+
+SELECT COUNT(*) AS left_goals
+FROM health_goal g JOIN user_account a ON a.id = g.user_id
+WHERE a.username IN ('tstb7edgea', 'tstb7edgeb');
+
+-- 3.2 全库 tst 前缀遗留（应为 0；若有则说明仍有测试账号未清理）
+SELECT COUNT(*) AS tst_accounts_left FROM user_account WHERE username LIKE 'tst%';
+
+SELECT COUNT(*) AS tst_records_left
+FROM health_record r JOIN user_account a ON a.id = r.user_id
+WHERE a.username LIKE 'tst%';
+
+-- 3.3 清理后结构未变（应仍为 9 / 17 / 0 / 0001_initial_schema）
+SELECT COUNT(*) AS tables_cnt FROM information_schema.tables WHERE table_schema = DATABASE();
+SELECT COUNT(DISTINCT index_name) AS nonpk_index_cnt FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY';
+SELECT COUNT(*) AS fk_cnt FROM information_schema.table_constraints
+WHERE table_schema = DATABASE() AND constraint_type = 'FOREIGN KEY';
+SELECT version_num FROM alembic_version;

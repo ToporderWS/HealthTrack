@@ -1,0 +1,13 @@
+{
+  "name": "kangji-healthtrack-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "康迹 HealthTrack 移动端（UniApp + Vue3 + HBuilderX 原生工程布局）",
+  "comment": "本体工程按 S1-D §7 冻结布局创建（pages.json / manifest.json / App.vue / main.js 位于工程根）。uni-app 运行时与编译器由 HBuilderX 内置工具链提供，因此此处不声明 @dcloudio/* 构建工具链；package.json 仅用于声明前端第三方依赖（S1-D 冻结：Pinia 2.x；uCharts 待趋势图批次安装）。",
+  "dependencies": {
+    "pinia": "^2.1.7"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

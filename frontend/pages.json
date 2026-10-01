@@ -1,0 +1,244 @@
+{
+    "pages": [
+        {
+            "path": "pages/launch/index",
+            "style": {
+                "navigationStyle": "custom",
+                "navigationBarTitleText": "康迹",
+                "navigationBarTextStyle": "black",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "backgroundColor": "#F5F7F9",
+                "disableScroll": true
+            }
+        },
+        {
+            "path": "pages/onboarding/index",
+            "style": {
+                "navigationStyle": "custom",
+                "navigationBarTitleText": "欢迎使用康迹",
+                "navigationBarTextStyle": "black",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/auth/login",
+            "style": {
+                "navigationStyle": "custom",
+                "navigationBarTitleText": "登录",
+                "navigationBarTextStyle": "black",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/auth/register",
+            "style": {
+                "navigationStyle": "custom",
+                "navigationBarTitleText": "注册",
+                "navigationBarTextStyle": "black",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/onboarding/profile-setup",
+            "style": {
+                "navigationStyle": "custom",
+                "navigationBarTitleText": "完善健康档案",
+                "navigationBarTextStyle": "black",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/index/index",
+            "style": {
+                "navigationStyle": "custom",
+                "navigationBarTitleText": "康迹",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/record/index",
+            "style": {
+                "navigationBarTitleText": "记录中心",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/record/add",
+            "style": {
+                "navigationBarTitleText": "记录",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/record/detail",
+            "style": {
+                "navigationBarTitleText": "记录详情",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/record/history",
+            "style": {
+                "navigationBarTitleText": "记录历史",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/trend/index",
+            "style": {
+                "navigationStyle": "custom",
+                "navigationBarTitleText": "趋势",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/goal/index",
+            "style": {
+                "navigationBarTitleText": "健康目标",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/goal/edit",
+            "style": {
+                "navigationBarTitleText": "目标",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/reminder/index",
+            "style": {
+                "navigationBarTitleText": "健康提醒",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/reminder/edit",
+            "style": {
+                "navigationBarTitleText": "提醒",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/profile/index",
+            "style": {
+                "navigationBarTitleText": "健康档案",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/profile/edit",
+            "style": {
+                "navigationBarTitleText": "档案编辑",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/mine/index",
+            "style": {
+                "navigationStyle": "custom",
+                "navigationBarTitleText": "我的",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/mine/password",
+            "style": {
+                "navigationBarTitleText": "修改密码",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/data/index",
+            "style": {
+                "navigationBarTitleText": "数据管理",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/data/export",
+            "style": {
+                "navigationBarTitleText": "数据导出",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/data/delete",
+            "style": {
+                "navigationBarTitleText": "数据删除",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/mine/privacy",
+            "style": {
+                "navigationBarTitleText": "隐私政策",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/mine/terms",
+            "style": {
+                "navigationBarTitleText": "用户协议",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        },
+        {
+            "path": "pages/mine/about",
+            "style": {
+                "navigationBarTitleText": "关于",
+                "navigationBarBackgroundColor": "#FFFFFF",
+                "navigationBarTextStyle": "black",
+                "backgroundColor": "#F5F7F9"
+            }
+        }
+    ],
+    "globalStyle": {
+        "navigationBarTextStyle": "black",
+        "navigationBarTitleText": "康迹",
+        "navigationBarBackgroundColor": "#FFFFFF",
+        "backgroundColor": "#F5F7F9"
+    }
+}

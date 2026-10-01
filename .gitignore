@@ -1,0 +1,48 @@
+# 《康迹 HealthTrack》根级 .gitignore
+# 依据：《S1-D-开发环境与工程实施准备》§5.2「.gitignore 禁提交清单（S2 落地，内容现予冻结）」
+# 原则：忽略密钥 / 依赖 / 构建产物 / 运行产物 / 编辑器与系统临时文件；
+#       绝不忽略源码、Alembic 迁移文件、配置模板（.env.example）。
+
+# ── 环境与密钥 ──────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# ── 后端 ────────────────────────────────────
+backend/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+backend/logs/
+backend/storage/
+*.db
+
+# ── 前端 ────────────────────────────────────
+frontend/node_modules/
+frontend/unpackage/
+frontend/.hbuilderx/
+frontend/dist/
+build/
+
+# ── 数据库导出 / 备份 ───────────────────────
+database/*.bak
+database/*.dump
+*.sql.gz
+
+# ── 日志 ────────────────────────────────────
+*.log
+
+# ── 编辑器 / 系统 ───────────────────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.keystore
+*.jks
+.workbuddy/
+cache/

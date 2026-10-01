@@ -1,0 +1,145 @@
+【S2 第六批 E-01~E-04 数据导出 · 人工验收 · 复制粘贴素材 B：数据库只读核查 + 收尾清理】
+
+口径：
+  - 第 1~2 段：**只读**（SELECT / SHOW），不 commit、不改结构、不改任何业务数据。
+  - 第 3 段：**收尾清理**，仅针对本批 Edge 验收账号 tstb6edgea / tstb6edgeb，逐表 DELETE（非 TRUNCATE）。
+  - 数据库：kangji_healthtrack（MySQL 8.0.33）。
+  - 顺序：先跑素材 C（第 3 步）且**尚未清理**时执行第 1~2 段；第 3 段在核查完成后再执行。
+  - 结构事实（冻结，供比对）：
+      user_session        —— 失效标记是 revoked_at（**没有** is_revoked 列）；
+                              计数列 = export_pwd_fail_count / change_pwd_fail_count；
+      login_failure_state —— 主键业务键是 username（**没有** user_id 列）；
+      export_job          —— 15 列，**无** is_deleted / deleted_at（本表不软删）。
+
+════════════════════════════════════════════════════════════════
+第 0 段：连接
+════════════════════════════════════════════════════════════════
+USE kangji_healthtrack;
+
+════════════════════════════════════════════════════════════════
+第 1 段：结构指纹（应：9 表 / 17 非主键索引 / 0 外键 / 迁移 0001）
+════════════════════════════════════════════════════════════════
+SELECT COUNT(*) AS tables_cnt
+FROM information_schema.tables WHERE table_schema = DATABASE();
+
+SELECT COUNT(DISTINCT index_name) AS nonpk_index_cnt
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY';
+
+SELECT COUNT(*) AS fk_cnt
+FROM information_schema.table_constraints
+WHERE table_schema = DATABASE() AND constraint_type = 'FOREIGN KEY';
+
+SELECT version_num AS alembic_version FROM alembic_version;
+
+SHOW COLUMNS FROM export_job;
+
+SELECT COUNT(*) AS export_job_col_cnt
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = 'export_job';
+
+SELECT COUNT(*) AS export_job_softdelete_col_cnt
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = 'export_job'
+  AND column_name IN ('is_deleted', 'deleted_at');
+
+SELECT index_name, GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols, non_unique
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'export_job'
+GROUP BY index_name, non_unique;
+
+════════════════════════════════════════════════════════════════
+第 2 段：E-01~E-04 数据核查（Edge 验收后**立即**执行）
+════════════════════════════════════════════════════════════════
+-- 2.1 导出任务全貌（file_token 只显示前 8 位，避免输出完整凭证）
+SELECT e.id, e.user_id, a.username, e.format, e.metric_types,
+       e.range_start, e.range_end, e.status,
+       LEFT(e.file_token, 8) AS token_head, LENGTH(e.file_token) AS token_len,
+       e.file_path IS NOT NULL AS has_path,
+       e.file_size_bytes, e.record_count,
+       e.download_expires_at, e.purge_at, e.downloaded_at, e.created_at,
+       TIMESTAMPDIFF(SECOND, e.created_at, e.download_expires_at) AS dl_window_s,
+       TIMESTAMPDIFF(SECOND, e.created_at, e.purge_at)            AS purge_window_s
+FROM export_job e
+JOIN user_account a ON a.id = e.user_id
+WHERE a.username IN ('tstb6edgea', 'tstb6edgeb')
+ORDER BY e.created_at DESC, e.id DESC;
+
+-- 2.2 二次验密计数（连错 3 次 -> 3；随后成功 -> 0）
+SELECT s.id AS session_id, a.username, s.revoked_at,
+       s.export_pwd_fail_count, s.change_pwd_fail_count,
+       s.created_at, s.last_used_at
+FROM user_session s
+JOIN user_account a ON a.id = s.user_id
+WHERE a.username IN ('tstb6edgea', 'tstb6edgeb')
+ORDER BY s.id DESC;
+
+-- 2.3 造数记录（含软删行：is_deleted = 1 的**不得**出现在导出文件里）
+SELECT r.id, r.user_id, r.metric_type, r.value_1, r.value_2, r.value_3,
+       r.unit, r.attr_1, r.recorded_at, r.is_deleted, r.deleted_at
+FROM health_record r
+JOIN user_account a ON a.id = r.user_id
+WHERE a.username IN ('tstb6edgea', 'tstb6edgeb')
+ORDER BY r.id;
+
+-- 2.4 记录标签（软删行不得出现在导出的 tags 列）
+SELECT t.id, t.record_id, t.tag_value, t.is_deleted
+FROM record_tag t
+JOIN user_account a ON a.id = t.user_id
+WHERE a.username IN ('tstb6edgea', 'tstb6edgeb')
+ORDER BY t.id;
+
+-- 2.5 各表行数（清理前留痕）
+SELECT 'export_job' AS tbl, COUNT(*) AS rows_cnt FROM export_job
+UNION ALL SELECT 'health_record',    COUNT(*) FROM health_record
+UNION ALL SELECT 'record_tag',       COUNT(*) FROM record_tag
+UNION ALL SELECT 'health_goal',      COUNT(*) FROM health_goal
+UNION ALL SELECT 'user_session',     COUNT(*) FROM user_session
+UNION ALL SELECT 'user_account',     COUNT(*) FROM user_account;
+
+-- 2.6 非测试账号是否误伤（本批测试账号前缀应为 tst；此查询用于确认无其它账号被波及）
+SELECT id, username, created_at FROM user_account
+WHERE username NOT LIKE 'tst%' ORDER BY id;
+
+════════════════════════════════════════════════════════════════
+第 3 段：收尾清理（**仅** tstb6edgea / tstb6edgeb）
+         —— 本批无「删除导出任务」接口，故 Edge 验收产生的任务只能在此清理
+════════════════════════════════════════════════════════════════
+SET @a := (SELECT id FROM user_account WHERE username = 'tstb6edgea');
+SET @b := (SELECT id FROM user_account WHERE username = 'tstb6edgeb');
+SELECT @a AS aid, @b AS bid;   -- 清理前确认：两值应非 NULL
+
+DELETE FROM record_tag          WHERE user_id IN (@a, @b);
+DELETE FROM health_record       WHERE user_id IN (@a, @b);
+DELETE FROM health_goal         WHERE user_id IN (@a, @b);
+DELETE FROM export_job          WHERE user_id IN (@a, @b);
+DELETE FROM user_session        WHERE user_id IN (@a, @b);
+DELETE FROM user_profile        WHERE user_id IN (@a, @b);
+DELETE FROM login_failure_state WHERE username IN ('tstb6edgea', 'tstb6edgeb');
+DELETE FROM user_account        WHERE id IN (@a, @b);
+COMMIT;
+
+-- 3.1 清理后自证：三条应分别为 0 / 0 / 0
+SELECT COUNT(*) AS left_jobs
+FROM export_job e JOIN user_account a ON a.id = e.user_id
+WHERE a.username IN ('tstb6edgea', 'tstb6edgeb');
+
+SELECT COUNT(*) AS left_accounts
+FROM user_account WHERE username IN ('tstb6edgea', 'tstb6edgeb');
+
+SELECT COUNT(*) AS left_records
+FROM health_record r JOIN user_account a ON a.id = r.user_id
+WHERE a.username IN ('tstb6edgea', 'tstb6edgeb');
+
+-- 3.2 全库 tst 前缀遗留（应为 0；若有则说明仍有测试账号未清理）
+SELECT COUNT(*) AS tst_accounts_left FROM user_account WHERE username LIKE 'tst%';
+
+SELECT COUNT(*) AS tst_jobs_left
+FROM export_job e JOIN user_account a ON a.id = e.user_id
+WHERE a.username LIKE 'tst%';
+
+-- 3.3 清理后结构未变（应仍为 9 / 17 / 0）
+SELECT COUNT(*) AS tables_cnt FROM information_schema.tables WHERE table_schema = DATABASE();
+SELECT COUNT(DISTINCT index_name) AS nonpk_index_cnt FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY';
+SELECT version_num FROM alembic_version;
